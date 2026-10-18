@@ -87,9 +87,8 @@ async def list_models(
     for model in models:
         clean_id = model.name.removeprefix("models/")
         for variant_prefix, desc_suffix in (
-            ("假流式-", " (假流式模式：非流式调用后分块模拟 SSE 流式输出)"),
-            ("抗截断-", " (抗截断模式：通过合成工具调用绕过截断限制)"),
-            ("假流抗截断-", " (假流抗截断：抗截断收集完整内容后分块模拟 SSE 输出)"),
+            ("假流式-", " (假流式模式：上游流式收数据+心跳保活，收完推完整JSON)"),
+            ("抗截断-", " (抗截断模式：通过合成工具调用绕过截断限制+心跳保活)"),
         ):
             variant_models.append(
                 GeminiModelResponse(
@@ -121,7 +120,6 @@ async def get_model(
 
     # 解析变体前缀
     _VARIANT_PREFIXES = {
-        "假流抗截断-": " (假流抗截断模式)",
         "假流式-": " (假流式模式)",
         "抗截断-": " (抗截断模式)",
     }
