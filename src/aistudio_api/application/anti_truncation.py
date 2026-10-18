@@ -568,61 +568,64 @@ def build_anti_truncation_stream_response(
     """流式抗截断：上游走流式通道收数据，期间发心跳保活，收完后一次性推完整结果。"""
 
     async def _stream() -> AsyncGenerator[str, None]:
-        tool_name = _generate_tool_name()
-        injected_req = inject_anti_truncation(req, tool_name)
-        collected_text = io.StringIO()
+        # 结果容器
+        result_chunks: list[str] = []
+        work_error: list[Exception] = []
+        done_event = asyncio.Event()
 
-        last_finish_reason: str | None = None
-        latest_response_id: str | None = None
-        latest_usage: dict[str, object] | None = None
-        last_normalized = None
-        last_thinking_parts: list[str] = []
-        last_images: list = []
-        last_reasoning_images: list = []
-        last_real_calls: list[dict[str, object]] = []
+        HEARTBEAT_DATA = 'data: {"candidates": [{"content": {"parts": [{"text": ""}], "role": "model"}, "index": 0}]}\n\n'
 
-        for continuation in range(MAX_CONTINUATION_ATTEMPTS):
-            if continuation == 0:
-                current_req = injected_req
-            else:
-                # 续传时生成新的随机工具名
+        async def _do_work():
+            """后台执行全部工作：准备请求、调上游、收数据、续传。"""
+            try:
                 tool_name = _generate_tool_name()
-                current_req = _build_continuation_request(
-                    injected_req, collected_text.getvalue(), tool_name
-                )
-                current_req = inject_anti_truncation(
-                    current_req, tool_name, continuation=True
-                )
+                injected_req = inject_anti_truncation(req, tool_name)
+                collected_text = io.StringIO()
 
-            stream_complete = False
+                last_finish_reason: str | None = None
+                latest_response_id: str | None = None
+                latest_usage: dict[str, object] | None = None
+                last_normalized = None
+                last_thinking_parts: list[str] = []
+                last_images: list = []
+                last_reasoning_images: list = []
+                last_real_calls: list[dict[str, object]] = []
 
-            for attempt in range(MAX_RETRIES):
-                await ensure_active_account(attempt, model=model_path)
-                try:
-                    normalized = normalize_gemini_request(current_req, model_path)
-                    logger.info(
-                        "抗截断请求: model=%s, tool=%s, 续传轮次=%d, 重试=%d",
-                        normalized.model,
-                        tool_name,
-                        continuation + 1,
-                        attempt + 1,
-                    )
+                for continuation in range(MAX_CONTINUATION_ATTEMPTS):
+                    if continuation == 0:
+                        current_req = injected_req
+                    else:
+                        tool_name = _generate_tool_name()
+                        current_req = _build_continuation_request(
+                            injected_req, collected_text.getvalue(), tool_name
+                        )
+                        current_req = inject_anti_truncation(
+                            current_req, tool_name, continuation=True
+                        )
 
-                    # 本轮收集容器
-                    round_text_parts: list[str] = []
-                    round_thinking_parts: list[str] = []
-                    round_function_calls: list[dict[str, object]] = []
-                    round_images: list = []
-                    round_reasoning_images: list = []
-                    round_finish_reason: int | None = None
-                    round_usage: dict[str, object] | None = None
-                    round_response_id: str | None = None
-                    collect_error: list[Exception] = []
-                    done_event = asyncio.Event()
+                    stream_complete = False
 
-                    async def _collect_upstream():
-                        nonlocal round_finish_reason, round_usage, round_response_id
+                    for attempt in range(MAX_RETRIES):
+                        await ensure_active_account(attempt, model=model_path)
                         try:
+                            normalized = normalize_gemini_request(current_req, model_path)
+                            logger.info(
+                                "抗截断请求: model=%s, tool=%s, 续传轮次=%d, 重试=%d",
+                                normalized.model,
+                                tool_name,
+                                continuation + 1,
+                                attempt + 1,
+                            )
+
+                            round_text_parts: list[str] = []
+                            round_thinking_parts: list[str] = []
+                            round_function_calls: list[dict[str, object]] = []
+                            round_images: list = []
+                            round_reasoning_images: list = []
+                            round_finish_reason: int | None = None
+                            round_usage: dict[str, object] | None = None
+                            round_response_id: str | None = None
+
                             async for event_type, payload in client.stream_generate_content(
                                 model=normalized.model,
                                 capture_prompt=normalized.capture_prompt,
@@ -665,178 +668,158 @@ def build_anti_truncation_stream_response(
                                     round_finish_reason = payload if isinstance(payload, int) else None
                                 elif event_type == "response_id":
                                     round_response_id = str(payload)
-                        except Exception as e:
-                            collect_error.append(e)
-                        finally:
-                            done_event.set()
 
-                    # 启动收集任务，同时发心跳
-                    collect_task = asyncio.create_task(_collect_upstream())
-                    while not done_event.is_set():
-                        try:
-                            await asyncio.wait_for(
-                                done_event.wait(), timeout=HEARTBEAT_INTERVAL
+                            record_rotator_event("success", model=normalized.model)
+                            runtime_state.record(normalized.model, "success", round_usage)
+                            last_normalized = normalized
+                            latest_usage = round_usage
+                            latest_response_id = round_response_id
+
+                            if continuation == 0:
+                                last_thinking_parts = round_thinking_parts
+                                last_images = round_images
+                                last_reasoning_images = round_reasoning_images
+
+                            synthetic_content, real_calls = extract_synthetic_content(
+                                round_function_calls, tool_name
                             )
-                        except asyncio.TimeoutError:
-                            yield "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"\"}], \"role\": \"model\"}, \"index\": 0}]}\n\n"
+                            if synthetic_content:
+                                collected_text.write(synthetic_content)
+                            elif round_text_parts:
+                                collected_text.write("".join(round_text_parts))
+                            last_real_calls = real_calls
 
-                    await collect_task
+                            last_finish_reason = to_gemini_finish_reason(round_finish_reason)
+                            stream_complete = True
+                            break
 
-                    if collect_error:
-                        raise collect_error[0]
+                        except Exception as exc:
+                            if await handle_attempt_exception(
+                                exc,
+                                attempt=attempt,
+                                model_path=model_path,
+                                normalized_model=normalized.model if normalized else None,
+                                client=client,
+                            ):
+                                continue
+                            raise
 
-                    # 本轮收集完成
-                    record_rotator_event("success", model=normalized.model)
-                    runtime_state.record(normalized.model, "success", round_usage)
-                    last_normalized = normalized
-                    latest_usage = round_usage
-                    latest_response_id = round_response_id
+                    if not stream_complete:
+                        logger.error("抗截断：所有重试均失败")
+                        result_chunks.append(format_sse_error(
+                            HTTPException(
+                                500,
+                                detail={"message": "抗截断：所有重试均失败"},
+                            )
+                        ))
+                        collected_text.close()
+                        return
 
-                    # 只保留第一轮的 thinking/images
-                    if continuation == 0:
-                        last_thinking_parts = round_thinking_parts
-                        last_images = round_images
-                        last_reasoning_images = round_reasoning_images
+                    is_cut = _is_cut_short(last_finish_reason)
+                    has_content = bool(collected_text.getvalue())
 
-                    # 从 function_calls 中分离合成工具内容和真实调用
-                    synthetic_content, real_calls = extract_synthetic_content(
-                        round_function_calls, tool_name
+                    if not is_cut:
+                        logger.info(
+                            "抗截断完成: finish=%s, 已收集=%d字符",
+                            last_finish_reason,
+                            len(collected_text.getvalue()),
+                        )
+                        break
+
+                    if not has_content:
+                        logger.warning(
+                            "抗截断：无内容且截断 (finish=%s)", last_finish_reason
+                        )
+                        break
+
+                    logger.info(
+                        "抗截断：需要续传 (finish=%s, 已收集=%d字符)",
+                        last_finish_reason,
+                        len(collected_text.getvalue()),
                     )
-                    if synthetic_content:
-                        collected_text.write(synthetic_content)
-                    elif round_text_parts:
-                        collected_text.write("".join(round_text_parts))
-                    last_real_calls = real_calls
+                    continue
 
-                    last_finish_reason = to_gemini_finish_reason(round_finish_reason)
-
-                    stream_complete = True
-                    break
-
-                except Exception as exc:
-                    if await handle_attempt_exception(
-                        exc,
-                        attempt=attempt,
-                        model_path=model_path,
-                        normalized_model=normalized.model if normalized else None,
-                        client=client,
-                    ):
-                        continue
-                    yield format_sse_error(exc)
-                    collected_text.close()
-                    return
-
-            if not stream_complete:
-                logger.error("抗截断：所有重试均失败")
-                yield format_sse_error(
-                    HTTPException(
-                        500,
-                        detail={"message": "抗截断：所有重试均失败"},
-                    )
-                )
+                # 拼接完成，构建结果
+                full_text = collected_text.getvalue()
                 collected_text.close()
-                return
+                target_model = last_normalized.model if last_normalized else model_path
+                full_thinking = "".join(last_thinking_parts)
 
-            # 完整性判断
-            is_cut = _is_cut_short(last_finish_reason)
-            has_content = bool(collected_text.getvalue())
-
-            if not is_cut:
                 logger.info(
-                    "抗截断完成: finish=%s, 已收集=%d字符",
-                    last_finish_reason,
-                    len(collected_text.getvalue()),
+                    "抗截断生成完成: model=%s, 总内容=%d字符",
+                    target_model,
+                    len(full_text),
                 )
-                break
 
-            if not has_content:
-                logger.warning(
-                    "抗截断：无内容且截断 (finish=%s)", last_finish_reason
-                )
-                break
+                if full_thinking:
+                    chunk = format_sse_event(
+                        "thinking", full_thinking,
+                        model_version=target_model, response_id=latest_response_id,
+                    )
+                    if chunk:
+                        result_chunks.append(chunk)
 
-            # 截断，准备续传
-            logger.info(
-                "抗截断：需要续传 (finish=%s, 已收集=%d字符)",
-                last_finish_reason,
-                len(collected_text.getvalue()),
-            )
-            continue
+                if last_reasoning_images:
+                    chunk = format_sse_event(
+                        "reasoning_images", last_reasoning_images,
+                        model_version=target_model, response_id=latest_response_id,
+                    )
+                    if chunk:
+                        result_chunks.append(chunk)
 
-        # ========== 收集完成，一次性推完整结果 ==========
-        full_text = collected_text.getvalue()
-        collected_text.close()
-        target_model = last_normalized.model if last_normalized else model_path
-        full_thinking = "".join(last_thinking_parts)
+                if full_text:
+                    chunk = format_sse_event(
+                        "body", full_text,
+                        model_version=target_model, response_id=latest_response_id,
+                    )
+                    if chunk:
+                        result_chunks.append(chunk)
 
-        logger.info(
-            "抗截断生成完成: model=%s, 总内容=%d字符",
-            target_model,
-            len(full_text),
-        )
+                if last_real_calls:
+                    chunk = format_sse_event(
+                        "tool_calls", last_real_calls,
+                        model_version=target_model, response_id=latest_response_id,
+                    )
+                    if chunk:
+                        result_chunks.append(chunk)
 
-        # thinking
-        if full_thinking:
-            chunk = format_sse_event(
-                "thinking",
-                full_thinking,
-                model_version=target_model,
-                response_id=latest_response_id,
-            )
-            if chunk:
+                if last_images:
+                    chunk = format_sse_event(
+                        "images", last_images,
+                        model_version=target_model, response_id=latest_response_id,
+                    )
+                    if chunk:
+                        result_chunks.append(chunk)
+
+                result_chunks.append(format_sse_usage(
+                    latest_usage,
+                    finish_reason="STOP",
+                    model_version=target_model,
+                    response_id=latest_response_id,
+                ))
+
+            except Exception as exc:
+                work_error.append(exc)
+            finally:
+                done_event.set()
+
+        # 立刻启动后台工作，同时马上开始发心跳
+        work_task = asyncio.create_task(_do_work())
+
+        while not done_event.is_set():
+            try:
+                await asyncio.wait_for(done_event.wait(), timeout=HEARTBEAT_INTERVAL)
+            except asyncio.TimeoutError:
+                yield HEARTBEAT_DATA
+
+        await work_task
+
+        # 工作完成，推送结果
+        if work_error:
+            yield format_sse_error(work_error[0])
+        else:
+            for chunk in result_chunks:
                 yield chunk
-
-        # reasoning images
-        if last_reasoning_images:
-            chunk = format_sse_event(
-                "reasoning_images",
-                last_reasoning_images,
-                model_version=target_model,
-                response_id=latest_response_id,
-            )
-            if chunk:
-                yield chunk
-
-        # 主文本
-        if full_text:
-            chunk = format_sse_event(
-                "body",
-                full_text,
-                model_version=target_model,
-                response_id=latest_response_id,
-            )
-            if chunk:
-                yield chunk
-
-        # 真实工具调用
-        if last_real_calls:
-            chunk = format_sse_event(
-                "tool_calls",
-                last_real_calls,
-                model_version=target_model,
-                response_id=latest_response_id,
-            )
-            if chunk:
-                yield chunk
-
-        # 图片
-        if last_images:
-            chunk = format_sse_event(
-                "images",
-                last_images,
-                model_version=target_model,
-                response_id=latest_response_id,
-            )
-            if chunk:
-                yield chunk
-
-        # usage 收尾
-        yield format_sse_usage(
-            latest_usage,
-            finish_reason="STOP",
-            model_version=target_model,
-            response_id=latest_response_id,
-        )
 
     return StreamingResponse(
         _stream(),
