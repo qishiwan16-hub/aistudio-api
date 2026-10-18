@@ -81,7 +81,32 @@ async def list_models(
 
     discovered = await model_discovery.get_models(session=session)
     models = [_to_gemini_model(item) for item in discovered]
-    logger.info("获取模型列表完成 (共发现 %d 个)", len(models))
+
+    # 为每个模型生成假流式和抗截断变体
+    variant_models: list[GeminiModelResponse] = []
+    for model in models:
+        clean_id = model.name.removeprefix("models/")
+        for variant_prefix, desc_suffix in (
+            ("假流式-", " (假流式模式：非流式调用后分块模拟 SSE 流式输出)"),
+            ("抗截断-", " (抗截断模式：通过合成工具调用绕过截断限制)"),
+        ):
+            variant_models.append(
+                GeminiModelResponse(
+                    name=f"models/{variant_prefix}{clean_id}",
+                    version=model.version,
+                    displayName=f"{variant_prefix}{model.displayName or clean_id}",
+                    description=(model.description or "") + desc_suffix,
+                    inputTokenLimit=model.inputTokenLimit,
+                    outputTokenLimit=model.outputTokenLimit,
+                    supportedGenerationMethods=model.supportedGenerationMethods,
+                    temperature=model.temperature,
+                    topP=model.topP,
+                    topK=model.topK,
+                )
+            )
+    models.extend(variant_models)
+
+    logger.info("获取模型列表完成 (共发现 %d 个，含变体)", len(models))
     return GeminiModelListResponse(models=models)
 
 
@@ -93,8 +118,26 @@ async def get_model(
     session = runtime_state.client._session if runtime_state.client else None
     from aistudio_api.infrastructure.gateway.model_discovery import model_discovery
 
-    model_info = await model_discovery.get_model_by_id(model_id, session=session)
+    # 解析变体前缀
+    _VARIANT_PREFIXES = {"假流式-": " (假流式模式)", "抗截断-": " (抗截断模式)"}
+    clean_id = model_id
+    variant_suffix = ""
+    variant_prefix_str = ""
+    for vp, vs in _VARIANT_PREFIXES.items():
+        if clean_id.startswith(vp):
+            variant_prefix_str = vp
+            variant_suffix = vs
+            clean_id = clean_id[len(vp):]
+            break
+
+    model_info = await model_discovery.get_model_by_id(clean_id, session=session)
     if model_info is not None:
+        base = _to_gemini_model(model_info)
+        if variant_prefix_str:
+            base_clean = base.name.removeprefix("models/")
+            base.name = f"models/{variant_prefix_str}{base_clean}"
+            base.displayName = f"{variant_prefix_str}{base.displayName or base_clean}"
+            base.description = (base.description or "") + variant_suffix
         logger.info("成功获取模型元数据: %s", model_id)
-        return _to_gemini_model(model_info)
+        return base
     raise HTTPException(status_code=404, detail="Model not found")

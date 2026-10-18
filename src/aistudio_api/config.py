@@ -262,8 +262,8 @@ class Settings:
     proxy_url: str | None = discover_proxy_url()
     web_password: str | None = _load_web_password()
     api_keys: frozenset[str] = frozenset()
-    timeout_replay: int = int(os.getenv("AISTUDIO_TIMEOUT_REPLAY", "120"))
-    timeout_stream: int = int(os.getenv("AISTUDIO_TIMEOUT_STREAM", "120"))
+    timeout_replay: int = int(os.getenv("AISTUDIO_TIMEOUT_REPLAY", "500"))
+    timeout_stream: int = int(os.getenv("AISTUDIO_TIMEOUT_STREAM", "500"))
     timezone: str = resolve_timezone()
     locale: str = resolve_locale()
     dump_raw_response: bool = os.getenv("AISTUDIO_DUMP_RAW_RESPONSE", "0") in (
