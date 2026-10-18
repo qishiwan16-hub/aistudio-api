@@ -806,6 +806,9 @@ def build_anti_truncation_stream_response(
         # 立刻启动后台工作，同时马上开始发心跳
         work_task = asyncio.create_task(_do_work())
 
+        # 立刻发第一个心跳，确认 SSE 通道畅通
+        yield HEARTBEAT_DATA
+
         while not done_event.is_set():
             try:
                 await asyncio.wait_for(done_event.wait(), timeout=HEARTBEAT_INTERVAL)
