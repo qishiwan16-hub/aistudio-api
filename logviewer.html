@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>日志监控</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Noto+Serif+SC:wght@400;700;900&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#fafafa;color:#1a1a1a;font-family:'Space Mono',monospace;min-height:100vh;padding-bottom:60px}
+.header{border-bottom:3px solid #1a1a1a;padding:24px 20px 20px;background:#fff}
+.header h1{font-family:'Noto Serif SC',serif;font-size:28px;font-weight:900;letter-spacing:4px;margin-bottom:4px}
+.header .sub{font-size:11px;letter-spacing:2px;color:#999}
+.header .line{width:40px;height:2px;background:#1a1a1a;margin:12px 0}
+.tabs{display:flex;border-bottom:1px solid #e0e0e0;background:#fff;position:sticky;top:0;z-index:10}
+.tab{flex:1;padding:14px 4px;text-align:center;font-size:11px;letter-spacing:1px;cursor:pointer;border:none;background:none;color:#999;font-family:'Space Mono',monospace;transition:all .2s;border-bottom:2px solid transparent}
+.tab:hover{color:#1a1a1a}
+.tab.active{color:#1a1a1a;border-bottom:2px solid #1a1a1a;font-weight:700}
+.tab.err-tab{color:#c0392b}
+.tab.err-tab.active{border-bottom-color:#c0392b}
+.controls{display:flex;align-items:center;gap:10px;padding:12px 20px;background:#fff;border-bottom:1px solid #f0f0f0;position:sticky;top:47px;z-index:9}
+.btn{padding:7px 14px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-family:'Space Mono',monospace;border:1.5px solid #1a1a1a;background:#fff;color:#1a1a1a;cursor:pointer;transition:all .15s}
+.btn:hover{background:#1a1a1a;color:#fff}
+.btn.on{background:#1a1a1a;color:#fff}
+.search-box{padding:7px 10px;font-size:12px;font-family:'Space Mono',monospace;border:1.5px solid #e0e0e0;outline:none;width:140px;transition:border .2s}
+.search-box:focus{border-color:#1a1a1a}
+.info{margin-left:auto;font-size:10px;color:#999;display:flex;align-items:center;gap:6px}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.on{background:#1a1a1a}.dot.off{background:#ccc}
+.log-wrap{padding:0 20px}
+.date-hd{font-size:10px;letter-spacing:2px;color:#999;padding:12px 0 6px;border-bottom:1px solid #f0f0f0;margin-top:16px}
+.row{padding:5px 0;border-bottom:1px solid #f8f8f8;font-size:12px;line-height:1.6;word-break:break-all}
+.row:hover{background:#f5f5f5}
+.row .t{color:#999;margin-right:8px}
+.row.err{border-left:3px solid #1a1a1a;padding-left:12px;background:#f7f7f7}
+.row.err .m{font-weight:700}
+.row.warn{border-left:3px solid #bbb;padding-left:12px}
+.empty{text-align:center;padding:60px 20px;color:#ccc;font-size:13px;letter-spacing:1px}
+.anchor{display:flex;justify-content:center;padding:10px;position:fixed;bottom:12px;right:12px;z-index:20}
+.anchor .to-bottom{width:40px;height:40px;border-radius:50%;background:#1a1a1a;color:#fff;border:none;font-size:18px;cursor:pointer;display:none;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.anchor .to-bottom.show{display:flex}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>日志监控</h1>
+  <div class="sub">aistudio-api · 实时日志</div>
+  <div class="line"></div>
+</div>
+
+<div class="tabs">
+  <a href="/" style="flex:1;padding:14px 4px;text-align:center;font-size:11px;letter-spacing:1px;color:#999;text-decoration:none;font-family:'Space Mono',monospace;border-bottom:2px solid transparent">请求监控</a>
+  <button class="tab active" data-log="main">主服务</button>
+  <button class="tab" data-log="bridge">桥接服务</button>
+  <button class="tab" data-log="panel">配置面板</button>
+  <button class="tab err-tab" data-log="errors">⚠ 异常抓取</button>
+</div>
+
+<div class="controls">
+  <button class="btn on" id="liveBtn" onclick="toggleLive()">实时 ●</button>
+  <button class="btn" onclick="doRefresh()">刷新</button>
+  <input class="search-box" id="search" placeholder="过滤..." oninput="render()">
+  <div class="info">
+    <div class="dot" id="sDot"></div>
+    <span id="sTxt">连接中</span>
+    <span id="cnt" style="margin-left:4px"></span>
+  </div>
+</div>
+
+<div class="log-wrap" id="logWrap"><div class="empty">加载中...</div></div>
+
+<div class="anchor"><button class="to-bottom" id="goBot" onclick="goBottom()">↓</button></div>
+
+<script>
+const API = location.origin;
+let cur = 'main', live = true, lines = [], timer = null;
+let userScrolled = false;
+
+const EP = {
+  main: '/api/log/main',
+  bridge: '/api/log/bridge',
+  panel: '/api/log/panel',
+  errors: '/api/log/errors'
+};
+
+/* 检测用户是否滚到底部附近 */
+function nearBottom() {
+  return (window.innerHeight + window.scrollY) >= document.body.scrollHeight - 80;
+}
+window.addEventListener('scroll', () => {
+  userScrolled = !nearBottom();
+  document.getElementById('goBot').classList.toggle('show', userScrolled);
+});
+
+function goBottom() {
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+  userScrolled = false;
+  document.getElementById('goBot').classList.remove('show');
+}
+
+/* Tab 切换 */
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    cur = t.dataset.log;
+    lines = [];
+    userScrolled = false;
+    doRefresh();
+  });
+});
+
+function toggleLive() {
+  live = !live;
+  const b = document.getElementById('liveBtn');
+  b.textContent = live ? '实时 ●' : '暂停 ○';
+  b.classList.toggle('on', live);
+  live ? startTimer() : stopTimer();
+}
+function startTimer() { stopTimer(); timer = setInterval(doRefresh, 3000); }
+function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+
+function parse(raw) {
+  raw = raw.replace(/\x1b\[[0-9;]*m/g, '').trim();
+  if (!raw) return null;
+  let time = '', msg = raw;
+  const m = raw.match(/^(\d{4}[-\/]\d{2}[-\/]\d{2}\s+\d{2}:\d{2}:\d{2})/);
+  if (m) { time = m[1]; msg = raw.slice(m[0].length).replace(/^\s*[|\-]\s*/, ''); }
+  const isErr = /error|exception|traceback|fail|critical|blocked|拦截|refused|denied|429|500|502|503/i.test(msg);
+  const isWarn = /warn|timeout|retry|limit|throttl|过载|重试|超时/i.test(msg);
+  return { time, msg, raw, cls: isErr ? 'err' : isWarn ? 'warn' : '' };
+}
+
+async function doRefresh() {
+  try {
+    const r = await fetch(API + EP[cur] + '?lines=300&t=' + Date.now());
+    if (!r.ok) throw 0;
+    const txt = await r.text();
+    lines = txt.split('\n').map(parse).filter(Boolean);
+    render();
+    setSt(true);
+  } catch(e) { setSt(false); }
+}
+
+function render() {
+  const wrap = document.getElementById('logWrap');
+  const kw = document.getElementById('search').value.toLowerCase();
+  let fl = kw ? lines.filter(l => l.raw.toLowerCase().includes(kw)) : lines;
+
+  if (!fl.length) {
+    wrap.innerHTML = '<div class="empty">' + (cur === 'errors' ? '暂无异常，一切正常 ✓' : '暂无日志') + '</div>';
+    document.getElementById('cnt').textContent = '';
+    return;
+  }
+
+  /* 记住滚动位置 */
+  const wasAtBottom = nearBottom();
+  const oldH = document.body.scrollHeight;
+  const oldY = window.scrollY;
+
+  let h = '', ld = '';
+  fl.forEach(l => {
+    const d = l.time ? l.time.split(/\s+/)[0] : '';
+    if (d && d !== ld) { ld = d; h += '<div class="date-hd">' + d + '</div>'; }
+    const t = l.time ? l.time.split(/\s+/)[1] || '' : '';
+    h += '<div class="row ' + l.cls + '">';
+    if (t) h += '<span class="t">' + t + '</span>';
+    h += '<span class="m">' + esc(l.msg) + '</span></div>';
+  });
+  wrap.innerHTML = h;
+  document.getElementById('cnt').textContent = fl.length + ' 条';
+
+  /* 滚动策略：如果之前在底部就跟随，否则保持位置 */
+  if (wasAtBottom && !userScrolled) {
+    window.scrollTo(0, document.body.scrollHeight);
+  } else {
+    const diff = document.body.scrollHeight - oldH;
+    window.scrollTo(0, oldY);
+  }
+}
+
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function setSt(ok) {
+  document.getElementById('sDot').className = 'dot ' + (ok ? 'on' : 'off');
+  document.getElementById('sTxt').textContent = ok ? '已连接' : '离线';
+}
+
+doRefresh();
+startTimer();
+</script>
+</body>
+</html>

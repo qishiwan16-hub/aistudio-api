@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>aistudio-api 配置</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Playfair+Display:wght@400;600;700&display=swap');
+:root{--bg:#fafafa;--card:#fff;--border:#e5e5e5;--text:#111;--text2:#666;--text3:#aaa;--accent:#111;--tag:#f2f2f2;--input:#f8f8f8;--green:#2d8a4e;--red:#c0392b;--radius:5px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}
+.header{border-bottom:1px solid var(--border);background:var(--card);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;z-index:100}
+.logo{font-family:'Playfair Display',serif;font-size:18px;font-weight:700;letter-spacing:-0.5px}
+.header-right{display:flex;gap:12px}
+.btn{font-family:'Inter',sans-serif;font-size:12px;font-weight:500;padding:6px 16px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--text);cursor:pointer;transition:all .15s}
+.btn:hover{border-color:var(--text)}
+.btn-primary{background:var(--text);color:#fff;border-color:var(--text)}
+.btn-primary:hover{background:#333}
+.container{max-width:720px;margin:0 auto;padding:32px 20px 80px}
+.section{margin-bottom:36px}
+.section-header{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.section-title{font-family:'Playfair Display',serif;font-size:18px;font-weight:600}
+.section-sub{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1.5px;font-weight:500}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+.field{margin-bottom:18px}.field:last-child{margin-bottom:0}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.field-label{display:block;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.8px;color:var(--text2);margin-bottom:5px}
+.field-hint{font-size:11px;color:var(--text3);margin-top:3px}
+input[type="text"],input[type="number"],select,textarea{font-family:'Inter',sans-serif;width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--input);color:var(--text);outline:none;transition:border-color .15s}
+textarea{font-family:'SF Mono','Fira Code',monospace;font-size:12px;resize:vertical;min-height:60px}
+input:focus,select:focus,textarea:focus{border-color:var(--text)}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--tag)}
+.toggle-row:last-child{border-bottom:none}
+.toggle-info h4{font-size:13px;font-weight:500;margin-bottom:1px}
+.toggle-info p{font-size:11px;color:var(--text3)}
+.switch{position:relative;width:40px;height:22px;flex-shrink:0}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:var(--border);border-radius:22px;cursor:pointer;transition:.2s}
+.slider::before{content:'';position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
+.switch input:checked+.slider{background:var(--text)}
+.switch input:checked+.slider::before{transform:translateX(18px)}
+.toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:var(--radius);font-size:13px;font-weight:500;color:#fff;background:var(--text);box-shadow:0 4px 16px rgba(0,0,0,.12);transform:translateY(80px);opacity:0;transition:all .3s;z-index:200}
+.toast.show{transform:translateY(0);opacity:1}
+.toast.error{background:var(--red)}
+.toast.success{background:var(--green)}
+.chip-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;background:var(--tag);border-radius:16px;font-size:12px}
+.chip .rm{cursor:pointer;color:var(--text3);font-size:13px}.chip .rm:hover{color:var(--red)}
+.add-row{display:flex;gap:6px;margin-top:6px}.add-row input{flex:1}
+@media(max-width:640px){.header{padding:0 16px}.container{padding:20px 14px 60px}.field-row{grid-template-columns:1fr}.card{padding:14px}}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">aistudio-api</div>
+  <div class="header-right">
+    <button class="btn" onclick="loadConfig()">刷新</button>
+    <button class="btn btn-primary" onclick="saveConfig()">保存</button>
+  </div>
+</div>
+<div class="container" id="app">加载中...</div>
+<div class="toast" id="toast"></div>
+<script>
+let cfg={};
+let apiKeys=[];
+
+function toast(m,t=''){const e=document.getElementById('toast');e.textContent=m;e.className='toast show '+t;setTimeout(()=>e.className='toast',2500)}
+
+async function loadConfig(){
+  try{const r=await fetch('/api/config');cfg=await r.json();apiKeys=cfg.api_keys||[];render();toast('配置已加载','success')}catch(e){toast('加载失败','error')}
+}
+
+async function saveConfig(){
+  collect();
+  try{await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});toast('配置已保存','success')}catch(e){toast('保存失败','error')}
+}
+
+function collect(){
+  cfg.api_keys=apiKeys;
+  cfg.logging=cfg.logging||{};
+  cfg.logging.level=v('log_level');
+  cfg.logging.dump_requests=c('dump_req');
+  cfg.logging.dump_to_file=c('dump_file');
+  cfg.logging.dump_dir=v('dump_dir');
+  cfg.model_defaults=cfg.model_defaults||{};
+  cfg.model_defaults.drop_unsupported_params=c('drop_params');
+}
+
+function v(id){const e=document.getElementById(id);return e?e.value:''}
+function c(id){const e=document.getElementById(id);return e?e.checked:false}
+function esc(s){return(s||"").toString().replace(/"/g,'&quot;')}
+
+function addKey(){
+  const inp=document.getElementById('new_key');const val=inp.value.trim();
+  if(!val)return;if(!apiKeys.includes(val))apiKeys.push(val);inp.value='';renderKeys();
+}
+function rmKey(i){apiKeys.splice(i,1);renderKeys()}
+function renderKeys(){
+  const el=document.getElementById('chips_keys');
+  el.innerHTML=apiKeys.map((k,i)=>`<span class="chip">${k}<span class="rm" onclick="rmKey(${i})">&times;</span></span>`).join('');
+}
+
+function render(){
+  const log=cfg.logging||{};
+  const md=cfg.model_defaults||{};
+  document.getElementById('app').innerHTML=`
+  <div class="section">
+    <div class="section-header"><h2 class="section-title">API 鉴权</h2><span class="section-sub">客户端密钥</span></div>
+    <div class="card">
+      <label class="field-label">API 密钥列表</label>
+      <div class="field-hint">留空则免密开放，配置后客户端必须携带密钥</div>
+      <div class="chip-list" id="chips_keys"></div>
+      <div class="add-row">
+        <input type="text" id="new_key" placeholder="输入密钥..." onkeydown="if(event.key==='Enter')addKey()">
+        <button class="btn" onclick="addKey()">添加</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header"><h2 class="section-title">日志</h2><span class="section-sub">调试与转储</span></div>
+    <div class="card">
+      <div class="field"><label class="field-label">日志级别</label>
+        <select id="log_level">
+          <option value="DEBUG" ${log.level==='DEBUG'?'selected':''}>DEBUG</option>
+          <option value="INFO" ${log.level==='INFO'||!log.level?'selected':''}>INFO</option>
+          <option value="WARNING" ${log.level==='WARNING'?'selected':''}>WARNING</option>
+          <option value="ERROR" ${log.level==='ERROR'?'selected':''}>ERROR</option>
+        </select>
+      </div>
+      <div class="toggle-row"><div class="toggle-info"><h4>转储请求详情</h4><p>记录每次 API 请求/响应完整报文</p></div><label class="switch"><input type="checkbox" id="dump_req" ${log.dump_requests?'checked':''}><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="toggle-info"><h4>转储写入文件</h4><p>将请求/响应转储保存为独立文件</p></div><label class="switch"><input type="checkbox" id="dump_file" ${log.dump_to_file?'checked':''}><span class="slider"></span></label></div>
+      <div class="field" style="margin-top:12px"><label class="field-label">转储目录</label><input type="text" id="dump_dir" value="${esc(log.dump_dir||'dumps')}"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header"><h2 class="section-title">模型默认值</h2><span class="section-sub">全局模型行为</span></div>
+    <div class="card">
+      <div class="toggle-row"><div class="toggle-info"><h4>丢弃不支持的参数</h4><p>自动过滤客户端传入的未知参数，避免上游 400 报错</p></div><label class="switch"><input type="checkbox" id="drop_params" ${md.drop_unsupported_params?'checked':''}><span class="slider"></span></label></div>
+    </div>
+  </div>
+
+  <div class="card" style="display:flex;gap:10px;flex-wrap:wrap">
+    <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
+    <button class="btn" onclick="doAction('restart')">重启服务</button>
+    <button class="btn" style="color:var(--red);border-color:var(--red)" onclick="doAction('stop')">停止服务</button>
+  </div>
+  `;
+  renderKeys();
+}
+
+async function doAction(a){
+  try{const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:a})});const d=await r.json();toast(d.message||'完成','success')}catch(e){toast('操作失败','error')}
+}
+
+loadConfig();
+</script>
+</body>
+</html>

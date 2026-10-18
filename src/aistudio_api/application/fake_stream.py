@@ -6,7 +6,7 @@
 流程：
 1. 对客户端返回 SSE 流式响应（保持连接不断）
 2. 调上游流式接口，逐块收数据
-3. 收数据期间每隔几秒发 SSE 心跳（`: heartbeat`），防止连接超时
+3. 收数据期间每隔2秒发 SSE 空数据心跳，防止连接超时
 4. 拼接完成后，把完整结果作为一个 SSE data 事件推给客户端
 """
 
@@ -149,7 +149,7 @@ def build_fake_stream_response(
                         )
                     except asyncio.TimeoutError:
                         # 还没收完，发一个 SSE 心跳（注释行，不影响数据解析）
-                        yield ": heartbeat\n\n"
+                        yield "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"\"}], \"role\": \"model\"}, \"index\": 0}]}\n\n"
 
                 # 确保任务完成
                 await collect_task

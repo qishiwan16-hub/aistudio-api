@@ -1,0 +1,184 @@
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const url = require('url');
+
+const PORT = 18082;
+const BASE = path.join(process.env.HOME || '/data/data/com.termux/files/home', 'aistudio-api');
+
+const LOG_FILES = {
+  main:   path.join(BASE, 'aistudio.log'),
+  bridge: path.join(BASE, 'bridge.log'),
+  panel:  path.join(BASE, 'panel.log')
+};
+
+const PAGES = {
+  requests: path.join(BASE, 'requests.html'),
+  logs:     path.join(BASE, 'logviewer.html')
+};
+
+const ERR_RE = /error|exception|traceback|fail|critical|blocked|block.?reason|拦截|refused|denied|reject|429|500|502|503|timeout|超时|过载|throttl|limit|rate.?limit|quota|truncat|cut.?off|压缩|截断|max.?token|finish.?reason|content.?filter|safety|safety.?rating|recitation|overload|HARM_CATEGORY|PROHIBITED|RESOURCE_EXHAUSTED|UNAVAILABLE|candidates.*\[\]|candidates.*null|BLOCKED|SAFETY|MAX_TOKENS|prompt.?blocked|finish_reason/i;
+
+function tailFile(fp, n) {
+  try { return fs.readFileSync(fp, 'utf8').split('\n').slice(-n); }
+  catch(e) { return ['(日志未找到: ' + fp + ')']; }
+}
+
+function getErrors(n) {
+  let all = [];
+  Object.entries(LOG_FILES).forEach(([name, fp]) => {
+    try {
+      const lines = fs.readFileSync(fp, 'utf8').split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (ERR_RE.test(lines[i])) {
+          const s = Math.max(0, i-1), e = Math.min(lines.length-1, i+2);
+          for (let j = s; j <= e; j++) all.push('[' + name.toUpperCase() + '] ' + lines[j]);
+          all.push('');
+          i = e;
+        }
+      }
+    } catch(e) {}
+  });
+  return all.slice(-n);
+}
+
+/* ===== 解析请求记录 ===== */
+function parseRequests() {
+  let lines;
+  try { lines = fs.readFileSync(LOG_FILES.main, 'utf8').split('\n'); }
+  catch(e) { return []; }
+
+  const reqs = [];
+  const reqRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*收到.*请求.*model=(.+)/;
+  const infoRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:流式请求|请求).*model=([^,]+)(?:.*对话轮数=(\d+))?/;
+  const postRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP POST.*models\/([^:]+):.*->\s*(\d+)\s*\(([\d.]+)ms\)/;
+  const hookRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*Hook 拦截成功.*model=([^,]+)(?:.*snapshot=(\d+)\s*chars)?(?:.*body=(\d+)\s*chars)?/;
+  const errRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:ERROR|error|SAFETY|BLOCKED|HARM|RECITATION|RESOURCE_EXHAUSTED|finish_reason.*(?:SAFETY|RECITATION|OTHER))(.+)/i;
+
+  /* 用一个 map 按时间+模型聚合 */
+  const map = new Map();
+  /* 标准化模型名: models/gemini-4-argon → gemini-4-argon */
+  function normModel(m) { return m.replace(/^models\//, '').trim(); }
+  function getKey(time, model) { return time + '|' + normModel(model); }
+  function ensure(time, model) {
+    const k = getKey(time, model);
+    if (!map.has(k)) {
+      map.set(k, { time, model: normModel(model), status: 200, latency: '', turns: '', hookSnap: '', hookBody: '', type: 'ok', detail: '', _ts: Date.parse(time.replace(' ','T')+'Z') || 0 });
+    }
+    return map.get(k);
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    let m;
+
+    /* 收到请求 */
+    m = L.match(reqRe);
+    if (m) { ensure(m[1], m[2].trim()); continue; }
+
+    /* 请求详情（对话轮数） */
+    m = L.match(infoRe);
+    if (m) {
+      const r = ensure(m[1], m[2].trim());
+      if (m[3]) r.turns = m[3];
+      continue;
+    }
+
+    /* HTTP POST 状态码+耗时 */
+    m = L.match(postRe);
+    if (m) {
+      const r = ensure(m[1], m[2].trim());
+      r.status = parseInt(m[3]);
+      r.latency = m[4] + 'ms';
+      if (r.status >= 400) r.type = 'err';
+      continue;
+    }
+
+    /* Hook 拦截 - 时间可能差几秒，找最近的同模型请求 */
+    m = L.match(hookRe);
+    if (m) {
+      const hTime = m[1], hModel = normModel(m[2].trim());
+      /* 先精确匹配，再找10秒内同模型的最近请求 */
+      let r = map.get(getKey(hTime, hModel));
+      if (!r) {
+        const hTs = Date.parse(hTime.replace(' ','T')+'Z') || 0;
+        let best = null, bestDiff = Infinity;
+        for (const v of map.values()) {
+          if (normModel(v.model) === hModel) {
+            const diff = Math.abs(v._ts - hTs);
+            if (diff < 10000 && diff < bestDiff) { best = v; bestDiff = diff; }
+          }
+        }
+        r = best || ensure(hTime, hModel);
+      }
+      r.type = 'hook';
+      if (m[3]) r.hookSnap = m[3] + ' chars';
+      if (m[4]) r.hookBody = m[4] + ' chars';
+      continue;
+    }
+
+    /* 异常行 */
+    m = L.match(errRe);
+    if (m) {
+      /* 尝试关联到最近的请求 */
+      const last = [...map.values()].pop();
+      if (last && !last.detail) {
+        last.type = 'err';
+        last.detail = m[2].trim();
+      }
+    }
+  }
+
+  /* 转数组并按时间排序 */
+  return [...map.values()].sort((a, b) => a._ts - b._ts).slice(-200);
+}
+
+const server = http.createServer((req, res) => {
+  const parsed = url.parse(req.url, true);
+  const pn = parsed.pathname;
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  /* 首页 → 请求监控 */
+  if (pn === '/' || pn === '/index.html') {
+    try { res.writeHead(200, {'Content-Type':'text/html; charset=utf-8'}); res.end(fs.readFileSync(PAGES.requests, 'utf8')); }
+    catch(e) { res.writeHead(500); res.end('Page not found'); }
+    return;
+  }
+
+  /* 日志页 */
+  if (pn === '/logs') {
+    try { res.writeHead(200, {'Content-Type':'text/html; charset=utf-8'}); res.end(fs.readFileSync(PAGES.logs, 'utf8')); }
+    catch(e) { res.writeHead(500); res.end('Page not found'); }
+    return;
+  }
+
+  /* 请求 API */
+  if (pn === '/api/requests') {
+    const data = parseRequests();
+    res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
+    res.end(JSON.stringify(data));
+    return;
+  }
+
+  /* 日志 API */
+  const logMatch = pn.match(/^\/api\/log\/(main|bridge|panel)$/);
+  if (logMatch) {
+    const n = parseInt(parsed.query.lines) || 200;
+    res.writeHead(200, {'Content-Type':'text/plain; charset=utf-8'});
+    res.end(tailFile(LOG_FILES[logMatch[1]], n).join('\n'));
+    return;
+  }
+
+  if (pn === '/api/log/errors') {
+    const n = parseInt(parsed.query.lines) || 300;
+    res.writeHead(200, {'Content-Type':'text/plain; charset=utf-8'});
+    res.end(getErrors(n).join('\n'));
+    return;
+  }
+
+  res.writeHead(404); res.end('Not Found');
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('Log Viewer running at http://localhost:' + PORT);
+});

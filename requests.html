@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>请求监控</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Noto+Serif+SC:wght@400;700;900&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#fafafa;color:#1a1a1a;font-family:'Space Mono',monospace;min-height:100vh;padding-bottom:80px}
+.header{border-bottom:3px solid #1a1a1a;padding:24px 20px 20px;background:#fff}
+.header h1{font-family:'Noto Serif SC',serif;font-size:28px;font-weight:900;letter-spacing:4px;margin-bottom:4px}
+.header .sub{font-size:11px;letter-spacing:2px;color:#999}
+.header .line{width:40px;height:2px;background:#1a1a1a;margin:12px 0}
+.nav{display:flex;gap:0;border-bottom:1px solid #e0e0e0;background:#fff;position:sticky;top:0;z-index:10}
+.nav a{flex:1;display:block;padding:14px 4px;text-align:center;font-size:11px;letter-spacing:1px;color:#999;text-decoration:none;font-family:'Space Mono',monospace;border-bottom:2px solid transparent;transition:all .2s}
+.nav a:hover{color:#1a1a1a}
+.nav a.active{color:#1a1a1a;border-bottom:2px solid #1a1a1a;font-weight:700}
+.bar{display:flex;align-items:center;gap:10px;padding:12px 20px;background:#fff;border-bottom:1px solid #f0f0f0;position:sticky;top:47px;z-index:9;flex-wrap:wrap}
+.btn{padding:7px 14px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-family:'Space Mono',monospace;border:1.5px solid #1a1a1a;background:#fff;color:#1a1a1a;cursor:pointer;transition:all .15s}
+.btn:hover{background:#1a1a1a;color:#fff}
+.btn.on{background:#1a1a1a;color:#fff}
+.filter-btn{padding:6px 12px;font-size:10px;font-family:'Space Mono',monospace;border:1px solid #ddd;background:#fff;color:#999;cursor:pointer;transition:all .15s}
+.filter-btn:hover{border-color:#1a1a1a;color:#1a1a1a}
+.filter-btn.active{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
+.info{margin-left:auto;font-size:10px;color:#999;display:flex;align-items:center;gap:6px}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.on{background:#1a1a1a}.dot.off{background:#ccc}
+
+.cards{padding:16px 20px}
+.card{background:#fff;border:1px solid #eee;margin-bottom:12px;padding:16px;transition:all .2s}
+.card:hover{border-color:#ccc}
+.card.err{border-left:4px solid #1a1a1a}
+.card.warn{border-left:4px solid #999}
+.card.ok{border-left:4px solid #ddd}
+
+.card .top{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.card .model{font-family:'Noto Serif SC',serif;font-size:15px;font-weight:700;letter-spacing:1px}
+.card .badge{padding:3px 8px;font-size:9px;letter-spacing:1px;font-family:'Space Mono',monospace;border:1px solid}
+.badge.s200{color:#1a1a1a;border-color:#1a1a1a}
+.badge.s4xx{color:#c0392b;border-color:#c0392b;font-weight:700}
+.badge.s5xx{color:#c0392b;border-color:#c0392b;font-weight:700}
+.badge.blocked{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
+.badge.hook{color:#666;border-color:#999}
+.card .time-info{font-size:11px;color:#999;margin-left:auto}
+
+.card .meta{display:flex;gap:20px;flex-wrap:wrap}
+.card .meta-item{font-size:11px;color:#666}
+.card .meta-item span{color:#1a1a1a;font-weight:700}
+
+.card .detail{margin-top:10px;padding-top:10px;border-top:1px solid #f5f5f5;font-size:11px;color:#666;line-height:1.8;word-break:break-all;max-height:120px;overflow-y:auto}
+
+.stats{display:flex;gap:0;padding:0 20px;margin-top:16px;margin-bottom:8px}
+.stat-box{flex:1;padding:16px;background:#fff;border:1px solid #eee;text-align:center}
+.stat-box:not(:last-child){border-right:none}
+.stat-box .num{font-family:'Noto Serif SC',serif;font-size:24px;font-weight:900}
+.stat-box .label{font-size:9px;letter-spacing:2px;color:#999;margin-top:4px;text-transform:uppercase}
+
+.empty{text-align:center;padding:80px 20px;color:#ccc;font-size:13px;letter-spacing:1px}
+
+.anchor{position:fixed;bottom:12px;right:12px;z-index:20}
+.to-bottom{width:40px;height:40px;border-radius:50%;background:#1a1a1a;color:#fff;border:none;font-size:18px;cursor:pointer;display:none;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.to-bottom.show{display:flex}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>请求监控</h1>
+  <div class="sub">aistudio-api · 模型请求追踪</div>
+  <div class="line"></div>
+</div>
+
+<div class="nav">
+  <a href="/" class="active">请求监控</a>
+  <a href="/logs">原始日志</a>
+</div>
+
+<div class="stats" id="stats">
+  <div class="stat-box"><div class="num" id="sTotal">0</div><div class="label">总请求</div></div>
+  <div class="stat-box"><div class="num" id="sOk">0</div><div class="label">成功</div></div>
+  <div class="stat-box"><div class="num" id="sErr">0</div><div class="label">异常</div></div>
+  <div class="stat-box"><div class="num" id="sHook">0</div><div class="label">拦截</div></div>
+</div>
+
+<div class="bar">
+  <button class="btn on" id="liveBtn" onclick="toggleLive()">实时 ●</button>
+  <button class="filter-btn active" data-f="all" onclick="setFilter('all')">全部</button>
+  <button class="filter-btn" data-f="ok" onclick="setFilter('ok')">成功</button>
+  <button class="filter-btn" data-f="err" onclick="setFilter('err')">异常</button>
+  <button class="filter-btn" data-f="hook" onclick="setFilter('hook')">拦截</button>
+  <div class="info">
+    <div class="dot" id="sDot"></div>
+    <span id="sTxt">连接中</span>
+  </div>
+</div>
+
+<div class="cards" id="cards"><div class="empty">加载中...</div></div>
+
+<div class="anchor"><button class="to-bottom" id="goBot" onclick="goBottom()">↓</button></div>
+
+<script>
+let live = true, timer = null, reqs = [], curFilter = 'all';
+let userScrolled = false;
+
+function nearBottom() { return (window.innerHeight + window.scrollY) >= document.body.scrollHeight - 80; }
+window.addEventListener('scroll', () => {
+  userScrolled = !nearBottom();
+  document.getElementById('goBot').classList.toggle('show', userScrolled);
+});
+function goBottom() { window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'}); userScrolled=false; }
+
+function toggleLive() {
+  live = !live;
+  const b = document.getElementById('liveBtn');
+  b.textContent = live ? '实时 ●' : '暂停 ○';
+  b.classList.toggle('on', live);
+  live ? startTimer() : stopTimer();
+}
+function startTimer() { stopTimer(); timer = setInterval(fetchData, 3000); }
+function stopTimer() { if(timer){clearInterval(timer);timer=null;} }
+
+function setFilter(f) {
+  curFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.f === f));
+  render();
+}
+
+async function fetchData() {
+  try {
+    const r = await fetch('/api/requests?t=' + Date.now());
+    if (!r.ok) throw 0;
+    reqs = await r.json();
+    render();
+    setSt(true);
+  } catch(e) { setSt(false); }
+}
+
+function render() {
+  const wasBottom = nearBottom();
+
+  let filtered = reqs;
+  if (curFilter === 'ok') filtered = reqs.filter(r => r.type === 'ok');
+  else if (curFilter === 'err') filtered = reqs.filter(r => r.type === 'err');
+  else if (curFilter === 'hook') filtered = reqs.filter(r => r.type === 'hook');
+
+  /* 统计 */
+  const total = reqs.length;
+  const ok = reqs.filter(r => r.type === 'ok').length;
+  const err = reqs.filter(r => r.type === 'err').length;
+  const hook = reqs.filter(r => r.type === 'hook').length;
+  document.getElementById('sTotal').textContent = total;
+  document.getElementById('sOk').textContent = ok;
+  document.getElementById('sErr').textContent = err;
+  document.getElementById('sHook').textContent = hook;
+
+  const box = document.getElementById('cards');
+  if (!filtered.length) {
+    box.innerHTML = '<div class="empty">暂无请求记录</div>';
+    return;
+  }
+
+  let h = '';
+  filtered.forEach(r => {
+    const cls = r.type === 'err' ? 'err' : r.type === 'hook' ? 'warn' : 'ok';
+    const badgeCls = r.status >= 500 ? 's5xx' : r.status >= 400 ? 's4xx' : 's200';
+    h += '<div class="card ' + cls + '">';
+    h += '<div class="top">';
+    h += '<div class="model">' + esc(r.model) + '</div>';
+    h += '<div class="badge ' + badgeCls + '">' + r.status + '</div>';
+    if (r.type === 'hook') h += '<div class="badge hook">拦截</div>';
+    if (r.type === 'err') h += '<div class="badge s4xx">异常</div>';
+    h += '<div class="time-info">' + esc(r.time) + '</div>';
+    h += '</div>';
+    h += '<div class="meta">';
+    if (r.turns) h += '<div class="meta-item">对话轮数 <span>' + r.turns + '</span></div>';
+    if (r.latency) h += '<div class="meta-item">耗时 <span>' + r.latency + '</span></div>';
+    if (r.hookSnap) h += '<div class="meta-item">快照 <span>' + r.hookSnap + '</span></div>';
+    if (r.hookBody) h += '<div class="meta-item">响应体 <span>' + r.hookBody + '</span></div>';
+    h += '</div>';
+    if (r.detail) {
+      h += '<div class="detail">' + esc(r.detail) + '</div>';
+    }
+    h += '</div>';
+  });
+  box.innerHTML = h;
+
+  if (wasBottom && !userScrolled) window.scrollTo(0, document.body.scrollHeight);
+}
+
+function esc(s) { return s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') : ''; }
+function setSt(ok) {
+  document.getElementById('sDot').className = 'dot ' + (ok ? 'on' : 'off');
+  document.getElementById('sTxt').textContent = ok ? '已连接' : '离线';
+}
+
+fetchData();
+startTimer();
+</script>
+</body>
+</html>

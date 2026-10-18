@@ -678,7 +678,7 @@ def build_anti_truncation_stream_response(
                                 done_event.wait(), timeout=HEARTBEAT_INTERVAL
                             )
                         except asyncio.TimeoutError:
-                            yield ": heartbeat\n\n"
+                            yield "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"\"}], \"role\": \"model\"}, \"index\": 0}]}\n\n"
 
                     await collect_task
 
