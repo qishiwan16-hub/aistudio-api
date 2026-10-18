@@ -89,6 +89,7 @@ async def list_models(
         for variant_prefix, desc_suffix in (
             ("假流式-", " (假流式模式：非流式调用后分块模拟 SSE 流式输出)"),
             ("抗截断-", " (抗截断模式：通过合成工具调用绕过截断限制)"),
+            ("假流抗截断-", " (假流抗截断：抗截断收集完整内容后分块模拟 SSE 输出)"),
         ):
             variant_models.append(
                 GeminiModelResponse(
@@ -119,7 +120,11 @@ async def get_model(
     from aistudio_api.infrastructure.gateway.model_discovery import model_discovery
 
     # 解析变体前缀
-    _VARIANT_PREFIXES = {"假流式-": " (假流式模式)", "抗截断-": " (抗截断模式)"}
+    _VARIANT_PREFIXES = {
+        "假流抗截断-": " (假流抗截断模式)",
+        "假流式-": " (假流式模式)",
+        "抗截断-": " (抗截断模式)",
+    }
     clean_id = model_id
     variant_suffix = ""
     variant_prefix_str = ""

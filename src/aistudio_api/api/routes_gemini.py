@@ -15,7 +15,8 @@ from .schemas import GeminiGenerateContentRequest
 logger = get_logger("routes.gemini")
 router = APIRouter()
 
-# 特殊功能变体前缀
+# 特殊功能变体前缀（长前缀在前，避免短前缀误匹配）
+_FAKE_STREAM_ANTI_TRUNCATION_PREFIX = "假流抗截断-"
 _FAKE_STREAM_PREFIX = "假流式-"
 _ANTI_TRUNCATION_PREFIX = "抗截断-"
 
@@ -40,6 +41,9 @@ def _parse_model_variant(model_path: str) -> tuple[str, str | None]:
         prefix = "models/"
         name = name[len("models/"):]
 
+    if name.startswith(_FAKE_STREAM_ANTI_TRUNCATION_PREFIX):
+        real_name = name[len(_FAKE_STREAM_ANTI_TRUNCATION_PREFIX):]
+        return prefix + real_name, "fake_stream_anti_truncation"
     if name.startswith(_FAKE_STREAM_PREFIX):
         real_name = name[len(_FAKE_STREAM_PREFIX):]
         return prefix + real_name, "fake_stream"
@@ -79,6 +83,14 @@ async def generate_content(
 
         return await handle_anti_truncation_non_stream(real_model, req, client)
 
+    if variant == "fake_stream_anti_truncation":
+        # 假流抗截断在非流式接口下等同于普通抗截断非流式
+        from aistudio_api.application.anti_truncation import (
+            handle_anti_truncation_non_stream,
+        )
+
+        return await handle_anti_truncation_non_stream(real_model, req, client)
+
     return await handle_gemini_generate_content(real_model, req, client, stream=False)
 
 
@@ -106,5 +118,12 @@ async def stream_generate_content(
         )
 
         return build_anti_truncation_stream_response(client, req, real_model)
+
+    if variant == "fake_stream_anti_truncation":
+        from aistudio_api.application.fake_stream_anti_truncation import (
+            build_fake_stream_anti_truncation_response,
+        )
+
+        return build_fake_stream_anti_truncation_response(client, req, real_model)
 
     return await handle_gemini_generate_content(real_model, req, client, stream=True)
