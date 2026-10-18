@@ -60,6 +60,7 @@ def build_fake_stream_response(
         result_chunks: list[str] = []
         work_error: list[Exception] = []
         done_event = asyncio.Event()
+        started_event = asyncio.Event()  # Hook拦截成功后触发
 
         HEARTBEAT_DATA = 'data: {"candidates": [{"content": {"parts": [{"text": ""}], "role": "model"}, "index": 0}]}\n\n'
 
@@ -89,6 +90,7 @@ def build_fake_stream_response(
                         final_finish_reason: int | None = None
                         response_id: str | None = None
 
+                        first_event = True
                         async for event_type, payload in client.stream_generate_content(
                             model=normalized.model,
                             capture_prompt=normalized.capture_prompt,
@@ -106,6 +108,11 @@ def build_fake_stream_response(
                             sanitize_plain_text=False,
                             force_refresh_capture=attempt > 0,
                         ):
+                            # Hook拦截成功，进入流式循环，通知外层开始心跳
+                            if first_event:
+                                first_event = False
+                                started_event.set()
+
                             if event_type == "body" and payload:
                                 text_parts.append(str(payload))
                             elif event_type == "thinking" and payload:
@@ -133,6 +140,9 @@ def build_fake_stream_response(
                                 )
                             elif event_type == "response_id":
                                 response_id = str(payload)
+
+                        # 如果没收到任何事件也要确保 started
+                        started_event.set()
 
                         full_text = "".join(text_parts)
                         full_thinking = "".join(thinking_parts)
@@ -199,12 +209,18 @@ def build_fake_stream_response(
             finally:
                 done_event.set()
 
-        # 立刻启动后台工作，同时马上开始发心跳
+        # 立刻启动后台工作
         work_task = asyncio.create_task(_do_work())
 
-        # 立刻发第一个心跳，确认 SSE 通道畅通
-        yield HEARTBEAT_DATA
+        # 等 Hook 拦截成功或工作完成（哪个先到）
+        while not started_event.is_set() and not done_event.is_set():
+            await asyncio.sleep(0.05)
 
+        # Hook 成功，立刻发第一个心跳
+        if not done_event.is_set():
+            yield HEARTBEAT_DATA
+
+        # 持续发心跳直到工作完成
         while not done_event.is_set():
             try:
                 await asyncio.wait_for(done_event.wait(), timeout=HEARTBEAT_INTERVAL)
