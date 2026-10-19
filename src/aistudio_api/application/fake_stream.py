@@ -62,7 +62,7 @@ def build_fake_stream_response(
         done_event = asyncio.Event()
         started_event = asyncio.Event()  # Hook拦截成功后触发
 
-        HEARTBEAT_DATA = 'data: {"candidates": [{"content": {"parts": [{"text": "\u200b"}], "role": "model"}, "index": 0}]}\n\n'
+        HEARTBEAT_DATA = 'data: {"candidates": [{"content": {"parts": [{"text": ""}], "role": "model"}, "index": 0}]}\n\n'
 
         async def _do_work():
             """后台执行全部工作：准备请求、调上游、收数据。"""

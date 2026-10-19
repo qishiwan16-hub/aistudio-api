@@ -203,7 +203,7 @@ async def openai_list_models():
 
     client = get_client()
     session = client._session if client else None
-    models = await model_discovery.get_models(session)
+    models = await model_discovery.get_models(session=session)
 
     openai_models = []
     for m in models:
