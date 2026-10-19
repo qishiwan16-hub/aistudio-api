@@ -285,6 +285,36 @@ async def handle_attempt_exception(
             500, detail={"message": str(exc), "type": "server_error"}
         ) from exc
 
+    # 响应解析异常：IndexError/TypeError/KeyError 通常是模板 body 不完整或
+    # wire_codec/wire_parser 解析时数组越界，根据堆栈判断原因并给出详细信息
+    if isinstance(exc, (IndexError, TypeError, KeyError)):
+        import traceback as _tb
+        tb_text = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+        if "wire_codec" in tb_text or "wire_parser" in tb_text:
+            reason = (
+                "模板请求体(template body)格式不完整，通常是蓝绿切换/账号热切换后"
+                "浏览器页面未加载完成时就捕获了模板，导致缓存的body是空数组或短数组。"
+                "decode()访问body[N]时越界。"
+            )
+        elif "capture" in tb_text:
+            reason = "模板捕获阶段异常，捕获到的数据结构不符合预期。"
+        elif "anti_truncation" in tb_text:
+            reason = "反截断处理阶段异常，响应数据结构不符合预期。"
+        else:
+            reason = "响应处理阶段数据结构异常。"
+
+        detail_msg = (
+            f"{type(exc).__name__}: {exc} | 原因：{reason} | "
+            f"位置：{tb_text.splitlines()[-2].strip() if len(tb_text.splitlines()) >= 2 else 'unknown'}"
+        )
+        runtime_state.record(target_model, "errors")
+        record_rotator_event("error", model=target_model)
+        logger.error("响应解析异常: %s", detail_msg, exc_info=True)
+        client.clear_templates()
+        raise HTTPException(
+            500, detail={"message": detail_msg, "type": "server_error"}
+        ) from exc
+
     runtime_state.record(target_model, "errors")
     record_rotator_event("error", model=target_model)
     logger.error("Gemini 未知严重异常: %s", exc)

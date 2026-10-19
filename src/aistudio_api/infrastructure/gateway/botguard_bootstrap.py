@@ -39,8 +39,8 @@ async def install_page_hooks(page: CDPPage) -> str:
     if isinstance(result, str) and result.startswith("hooked:"):
         return result.split(":", 1)[1]
 
-    for _ in range(3):
-        await page.wait_for_timeout(1500)
+    for _ in range(8):
+        await page.wait_for_timeout(2500)
         curr_url = getattr(page, "url", "") or ""
         if is_login_page_url(curr_url):
             raise SessionExpiredError(
@@ -176,10 +176,15 @@ async def bootstrap_botguard_and_template(
 
     def on_req(req: dict[str, object]) -> None:
         url = str(req.get("url") or "")
-        if "GenerateContent" not in url or "Count" in url or captured:
+        if "GenerateContent" not in url or "Count" in url:
+            return
+        if captured:
+            log.debug("on_req: 已有模板，跳过重复 GenerateContent")
             return
         body = str(req.get("post_data") or "")
+        log.info("on_req: 拦截到 GenerateContent, body length=%d, url=%s", len(body), url[:80])
         if not body:
+            log.warning("on_req: postData 为空，跳过")
             return
         captured["url"] = url
         captured["headers"] = req.get("headers") or {}
@@ -201,7 +206,7 @@ async def bootstrap_botguard_and_template(
 
     try:
         try:
-            await page.wait_for_selector("textarea", timeout_s=15.0)
+            await page.wait_for_selector("textarea", timeout_s=30.0)
         except Exception as err:
             dbg_url = getattr(page, "url", "") or ""
             if is_login_page_url(dbg_url):
@@ -210,7 +215,7 @@ async def bootstrap_botguard_and_template(
                     dbg_url,
                 )
                 if reload_cookies_cb and await reload_cookies_cb(page):
-                    await page.wait_for_selector("textarea", timeout_s=15.0)
+                    await page.wait_for_selector("textarea", timeout_s=30.0)
                 else:
                     raise SessionExpiredError(
                         f"Cookie 认证失效，已被重定向到 Google 登录页: {dbg_url}"
@@ -238,7 +243,9 @@ async def bootstrap_botguard_and_template(
         await page.wait_for_timeout(600)
         await page.evaluate(DIALOG_CLEANUP_JS)
 
-        if not await click_run_button(page):
+        run_ok = await click_run_button(page)
+        log.info("click_run_button 结果: %s", run_ok)
+        if not run_ok:
             raise RuntimeError(
                 "failed to trigger run button while capturing BotGuardService"
             )
@@ -256,7 +263,9 @@ async def bootstrap_botguard_and_template(
                 )
 
             await page.wait_for_timeout(1000)
-            if await page.evaluate("() => !!window.__AISTUDIO__?.service"):
+            has_service = await page.evaluate("() => !!window.__AISTUDIO__?.service")
+            if has_service:
+                log.info("BotGuard service 已捕获 (iter=%d), captured=%s", i, bool(captured))
                 if not captured:
                     with suppress(Exception):
                         in_page_tpl = await page.evaluate(
@@ -290,6 +299,7 @@ async def bootstrap_botguard_and_template(
                                 captured["body"] = str(in_page_tpl["body"])
                                 break
                         await page.wait_for_timeout(100)
+                    log.info("等待 CDP 事件后 captured=%s", bool(captured))
                 await page.fill("textarea", original_text)
                 with suppress(Exception):
                     await page.evaluate(DOM_GC_CLEANUP_JS)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
 from dataclasses import dataclass
 
 from aistudio_api.config import DEFAULT_TEXT_MODEL
@@ -12,6 +13,17 @@ from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("capture")
+
+MIN_BODY_LEN = 4  # 至少需要 MODEL/CONTENTS/SAFETY/GENERATION_CONFIG
+
+
+def _validate_template_body(raw_body: str) -> bool:
+    """验证模板 body 是否为合法的 JSON 数组且长度足够。"""
+    try:
+        parsed = _json.loads(raw_body)
+        return isinstance(parsed, list) and len(parsed) >= MIN_BODY_LEN
+    except (ValueError, TypeError):
+        return False
 
 
 @dataclass
@@ -116,6 +128,37 @@ class RequestCaptureService:
                 return self._templates[model]
 
             captured = await self._session.capture_template(model)
+            raw_body = str(captured.get("body") or "")
+
+            if not _validate_template_body(raw_body):
+                # base_template 本身就是坏的（bootstrap 时页面没准备好），
+                # 重试读同一个缓存没意义，必须强制重做 BotGuard 握手
+                logger.warning(
+                    "捕获到不完整的模板 body，强制重新执行 BotGuard 握手刷新 base_template"
+                )
+                try:
+                    await self._session.transition_to_account(
+                        self._session._auth_file, force_refresh=True
+                    )
+                except Exception as e:
+                    logger.error("BotGuard 重新握手失败: %s", e)
+                    raise RuntimeError(
+                        "模板 body 不合法且 BotGuard 重新握手失败，无法继续处理请求"
+                    ) from e
+
+                # 握手后重新捕获
+                captured = await self._session.capture_template(model)
+                raw_body = str(captured.get("body") or "")
+
+                if not _validate_template_body(raw_body):
+                    logger.error(
+                        "BotGuard 重新握手后模板仍不合法 (body=%s)，拒绝缓存",
+                        raw_body[:200],
+                    )
+                    raise RuntimeError(
+                        "模板请求体格式不完整，BotGuard 重新握手后仍无法获取合法模板"
+                    )
+
             headers_dict = captured.get("headers")
             headers = {
                 str(k): str(v)
@@ -126,7 +169,7 @@ class RequestCaptureService:
             template = CapturedRequest(
                 url=str(captured.get("url") or ""),
                 headers=headers,
-                body=str(captured.get("body") or ""),
+                body=raw_body,
                 model=model,
             )
             self._templates[model] = template
