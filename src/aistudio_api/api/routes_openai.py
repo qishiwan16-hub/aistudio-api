@@ -294,105 +294,95 @@ async def _openai_stream(
 ) -> AsyncGenerator[str, None]:
     """流式：内部调用 Gemini 流式接口，转换成 OpenAI SSE 格式输出。
 
-    在等待上游响应期间每 2 秒发送零宽空格心跳，防止 New API / 酒馆连接超时。
+    在等待上游响应期间每 2 秒发送心跳保活，防止 New API / 酒馆连接超时。
+    心跳和数据都通过统一的 output_queue 输出，确保心跳不会被阻塞。
     """
     HEARTBEAT_INTERVAL = 2  # 秒
-    HEARTBEAT_CHUNK = _make_openai_chunk(chat_id, display_model, {"content": ""})
+    _SENTINEL = None  # 结束哨兵
 
-    # 心跳队列：后台 task 往里塞心跳，主循环从里面读
-    heartbeat_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    got_real_data = asyncio.Event()
+    output_queue: asyncio.Queue[str | None] = asyncio.Queue()
     done_event = asyncio.Event()
 
     async def _heartbeat_sender():
-        """后台心跳：收到真正数据前每隔 HEARTBEAT_INTERVAL 发一个零宽空格 chunk。"""
+        """后台心跳：每隔 HEARTBEAT_INTERVAL 往 output_queue 塞一个心跳 chunk。"""
+        hb = _make_openai_chunk(chat_id, display_model, {"content": ""})
         # 立刻发第一个心跳，确认 SSE 通道畅通
-        await heartbeat_queue.put(HEARTBEAT_CHUNK)
+        await output_queue.put(hb)
         while not done_event.is_set():
             try:
                 await asyncio.wait_for(done_event.wait(), timeout=HEARTBEAT_INTERVAL)
                 break
             except asyncio.TimeoutError:
-                if not got_real_data.is_set():
-                    await heartbeat_queue.put(HEARTBEAT_CHUNK)
-                # 收到真正数据后停止心跳（由主循环 set got_real_data）
-                # 但不退出，等 done_event
-        await heartbeat_queue.put(None)  # 哨兵，通知主循环心跳结束
+                await output_queue.put(hb)
 
-    heartbeat_task = asyncio.create_task(_heartbeat_sender())
+    async def _data_producer():
+        """数据生产者：获取 Gemini 响应并转换为 OpenAI chunk 塞入 output_queue。"""
+        try:
+            # 根据 variant 选择处理方式
+            if variant == "fake_stream":
+                from aistudio_api.application.fake_stream import build_fake_stream_response
+                gemini_resp = build_fake_stream_response(client, gemini_req, real_model)
+            elif variant == "anti_truncation":
+                from aistudio_api.application.anti_truncation import (
+                    build_anti_truncation_stream_response,
+                )
+                gemini_resp = build_anti_truncation_stream_response(
+                    client, gemini_req, real_model
+                )
+            else:
+                gemini_resp = await handle_gemini_generate_content(
+                    real_model, gemini_req, client, stream=True
+                )
+
+            async for raw_chunk in gemini_resp.body_iterator:
+                if not raw_chunk or not isinstance(raw_chunk, str):
+                    continue
+                for line in raw_chunk.strip().split("\n"):
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if not data_str or data_str == "[DONE]":
+                        continue
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    text = _extract_text_from_gemini(data)
+                    if text and text != "\u200b":  # 跳过 Gemini 层心跳零宽空格
+                        await output_queue.put(
+                            _make_openai_chunk(chat_id, display_model, {"content": text})
+                        )
+        except Exception as e:
+            logger.error("OpenAI 流式转换错误: %s", e, exc_info=True)
+            await output_queue.put(
+                _make_openai_chunk(
+                    chat_id, display_model, {"content": f"[Error]: {e}"}, "stop"
+                )
+            )
+        finally:
+            done_event.set()
+            await output_queue.put(_SENTINEL)
 
     # 先发 role chunk
     yield _make_openai_chunk(chat_id, display_model, {"role": "assistant"})
 
+    heartbeat_task = asyncio.create_task(_heartbeat_sender())
+    producer_task = asyncio.create_task(_data_producer())
+
     try:
-        # 根据 variant 选择处理方式，获取 Gemini StreamingResponse
-        if variant == "fake_stream":
-            from aistudio_api.application.fake_stream import build_fake_stream_response
-
-            gemini_resp = build_fake_stream_response(client, gemini_req, real_model)
-        elif variant == "anti_truncation":
-            from aistudio_api.application.anti_truncation import (
-                build_anti_truncation_stream_response,
-            )
-
-            gemini_resp = build_anti_truncation_stream_response(
-                client, gemini_req, real_model
-            )
-        else:
-            # 普通流式：直接调 Gemini 流式
-            gemini_resp = await handle_gemini_generate_content(
-                real_model, gemini_req, client, stream=True
-            )
-
-        # 在等待上游期间，先把队列里积攒的心跳 yield 出去
-        while not heartbeat_queue.empty():
-            hb = heartbeat_queue.get_nowait()
-            if hb is not None:
-                yield hb
-
-        # gemini_resp 是 StreamingResponse，取其 body_iterator
-        async for raw_chunk in gemini_resp.body_iterator:
-            # 每次收到数据前，先把心跳队列排空
-            while not heartbeat_queue.empty():
-                hb = heartbeat_queue.get_nowait()
-                if hb is not None:
-                    yield hb
-
-            if not raw_chunk or not isinstance(raw_chunk, str):
-                continue
-
-            # 解析 SSE data 行
-            for line in raw_chunk.strip().split("\n"):
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:].strip()
-                if not data_str or data_str == "[DONE]":
-                    continue
-
-                try:
-                    data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-
-                text = _extract_text_from_gemini(data)
-                if text and text != "\u200b":  # 跳过 Gemini 层心跳零宽空格
-                    got_real_data.set()  # 收到真正内容，停止心跳
-                    yield _make_openai_chunk(
-                        chat_id, display_model, {"content": text}
-                    )
-
-    except Exception as e:
-        logger.error("OpenAI 流式转换错误: %s", e, exc_info=True)
-        yield _make_openai_chunk(
-            chat_id, display_model, {"content": f"[Error]: {e}"}, "stop"
-        )
-        yield "data: [DONE]\n\n"
-        return
+        while True:
+            item = await output_queue.get()
+            if item is _SENTINEL:
+                break
+            yield item
     finally:
         done_event.set()
         heartbeat_task.cancel()
+        producer_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await producer_task
 
     # 结束
     yield _make_openai_chunk(chat_id, display_model, {}, "stop")
