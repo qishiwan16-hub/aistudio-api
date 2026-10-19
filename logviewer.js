@@ -50,10 +50,14 @@ function parseRequests() {
 
   const reqs = [];
   const reqRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*收到.*请求.*model=(.+)/;
-  const infoRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:流式请求|请求).*model=([^,]+)(?:.*对话轮数=(\d+))?/;
-  const postRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP POST.*models\/([^:]+):.*->\s*(\d+)\s*\(([\d.]+)ms\)/;
+  const infoRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:流式请求|假流式请求|请求).*model=([^,]+)(?:.*对话轮数=(\d+))?(?:.*尝试第\s*(\d+)\s*次)?/;
+  const postRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP POST.*models\/([^:/ ]+):.*->\s*(\d+)\s*\(([\d.]+)ms\)/;
   const hookRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*Hook 拦截成功.*model=([^,]+)(?:.*snapshot=(\d+)\s*chars)?(?:.*body=(\d+)\s*chars)?/;
+  const doneRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:假流式生成完成|流式完成).*model=([^,]+)(?:.*输入Tokens=(\d+))?(?:.*输出Tokens=(\d+))?/;
+  const geminiErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*\[aistudio\.api\.gemini\].*(?:未知严重异常|严重错误|Gemini错误|流式错误)[：:]\s*(.+)/;
+  const httpErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP (?:GET|POST)\s+(\S+)\s*->\s*(\d+)\s*\(([\d.]+)ms(?:,\s*(.+))?\)/;
   const errRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:ERROR|error|SAFETY|BLOCKED|HARM|RECITATION|RESOURCE_EXHAUSTED|finish_reason.*(?:SAFETY|RECITATION|OTHER))(.+)/i;
+  const idleRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*浏览器已空闲.*?(\d+\.?\d*)\s*秒/;
 
   /* 用一个 map 按时间+模型聚合 */
   const map = new Map();
@@ -63,7 +67,7 @@ function parseRequests() {
   function ensure(time, model) {
     const k = getKey(time, model);
     if (!map.has(k)) {
-      map.set(k, { time, model: normModel(model), status: 200, latency: '', turns: '', hookSnap: '', hookBody: '', type: 'ok', detail: '', _ts: Date.parse(time.replace(' ','T')+'Z') || 0 });
+      map.set(k, { time, model: normModel(model), status: 200, latency: '', turns: '', hookSnap: '', hookBody: '', type: 'ok', detail: '', inTokens: '', outTokens: '', resultText: '', retry: '', mode: '', _ts: Date.parse(time.replace(' ','T')+'Z') || 0 });
     }
     return map.get(k);
   }
@@ -76,11 +80,14 @@ function parseRequests() {
     m = L.match(reqRe);
     if (m) { ensure(m[1], m[2].trim()); continue; }
 
-    /* 请求详情（对话轮数） */
+    /* 请求详情（对话轮数、重试次数、模式） */
     m = L.match(infoRe);
     if (m) {
       const r = ensure(m[1], m[2].trim());
       if (m[3]) r.turns = m[3];
+      if (m[4]) r.retry = '第' + m[4] + '次';
+      if (L.includes('假流式')) r.mode = '假流式';
+      else if (L.includes('流式')) r.mode = '流式';
       continue;
     }
 
@@ -117,20 +124,89 @@ function parseRequests() {
       continue;
     }
 
-    /* 异常行 */
+    /* 完成行（token 数据） */
+    m = L.match(doneRe);
+    if (m) {
+      const dTime = m[1], dModel = normModel(m[2].trim());
+      const dTs = Date.parse(dTime.replace(' ','T')+'Z') || 0;
+      /* 找最近10分钟内同模型请求 */
+      let best = null, bestDiff = Infinity;
+      for (const v of map.values()) {
+        if (normModel(v.model) === dModel) {
+          const diff = dTs - v._ts;
+          if (diff >= 0 && diff < 600000 && diff < bestDiff) { best = v; bestDiff = diff; }
+        }
+      }
+      const r = best || ensure(dTime, dModel);
+      if (m[3]) r.inTokens = m[3];
+      if (m[4]) r.outTokens = m[4];
+      r.resultText = '✅ 生成完成';
+      /* 计算实际生成耗时（从请求到完成） */
+      if (best && bestDiff > 0) r.latency = (bestDiff / 1000).toFixed(1) + 's';
+      continue;
+    }
+
+    /* Gemini 错误行（网络断开等） */
+    m = L.match(geminiErrRe);
+    if (m) {
+      const eTs = Date.parse(m[1].replace(' ','T')+'Z') || 0;
+      let best = null, bestDiff = Infinity;
+      for (const v of map.values()) {
+        const diff = eTs - v._ts;
+        if (diff >= 0 && diff < 600000 && diff < bestDiff) { best = v; bestDiff = diff; }
+      }
+      if (best) {
+        best.type = 'err';
+        best.resultText = '❌ 失败';
+        best.detail = m[2].trim();
+      }
+      continue;
+    }
+
+    /* HTTP 错误行（如 /v1/models 500） */
+    m = L.match(httpErrRe);
+    if (m) {
+      const status = parseInt(m[3]);
+      if (status >= 400) {
+        const ep = m[2] || 'unknown';
+        const r = ensure(m[1], ep);
+        r.status = status;
+        r.latency = m[4] + 'ms';
+        r.type = 'err';
+        r.resultText = '❌ ' + status + ' 错误';
+        if (m[5]) r.detail = m[5].trim();
+      }
+      continue;
+    }
+
+    /* 浏览器空闲回收 */
+    m = L.match(idleRe);
+    if (m) {
+      const r = ensure(m[1], '系统');
+      r.type = 'ok';
+      r.resultText = '💤 浏览器空闲回收';
+      r.detail = '闲置 ' + Math.round(parseFloat(m[2])) + ' 秒后自动释放内存';
+      continue;
+    }
+
+    /* 通用异常行 */
     m = L.match(errRe);
     if (m) {
-      /* 尝试关联到最近的请求 */
       const last = [...map.values()].pop();
       if (last && !last.detail) {
         last.type = 'err';
+        if (!last.resultText) last.resultText = '❌ 异常';
         last.detail = m[2].trim();
       }
     }
   }
 
   /* 转数组并按时间排序 */
-  return [...map.values()].sort((a, b) => a._ts - b._ts).slice(-200);
+  /* 过滤掉没有实质信息的空条目（如 HTTP POST /v1/chat/completions 被误匹配的） */
+  return [...map.values()]
+    .filter(r => r.model !== 's' && r.model !== 'completions' && r.model.length > 1)
+    .sort((a, b) => a._ts - b._ts)
+    .slice(-200);
 }
 
 const server = http.createServer((req, res) => {

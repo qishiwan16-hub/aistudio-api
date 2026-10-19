@@ -42,6 +42,8 @@ body{background:#fafafa;color:#1a1a1a;font-family:'Space Mono',monospace;min-hei
 .badge.s5xx{color:#c0392b;border-color:#c0392b;font-weight:700}
 .badge.blocked{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
 .badge.hook{color:#666;border-color:#999}
+.badge.done{color:#2d7d46;border-color:#2d7d46}
+.badge.idle{color:#8e7cc3;border-color:#8e7cc3}
 .card .time-info{font-size:11px;color:#999;margin-left:auto}
 
 .card .meta{display:flex;gap:20px;flex-wrap:wrap}
@@ -170,11 +172,16 @@ function render() {
     h += '<div class="badge ' + badgeCls + '">' + r.status + '</div>';
     if (r.type === 'hook') h += '<div class="badge hook">拦截</div>';
     if (r.type === 'err') h += '<div class="badge s4xx">异常</div>';
+    if (r.resultText) h += '<div class="badge ' + (r.resultText.includes('✅') ? 'done' : r.resultText.includes('💤') ? 'idle' : '') + '">' + esc(r.resultText) + '</div>';
     h += '<div class="time-info">' + esc(r.time) + '</div>';
     h += '</div>';
     h += '<div class="meta">';
+    if (r.mode) h += '<div class="meta-item">模式 <span>' + esc(r.mode) + '</span></div>';
     if (r.turns) h += '<div class="meta-item">对话轮数 <span>' + r.turns + '</span></div>';
+    if (r.retry) h += '<div class="meta-item">重试 <span>' + esc(r.retry) + '</span></div>';
     if (r.latency) h += '<div class="meta-item">耗时 <span>' + r.latency + '</span></div>';
+    if (r.inTokens) h += '<div class="meta-item">输入 <span>' + Number(r.inTokens).toLocaleString() + ' token</span></div>';
+    if (r.outTokens) h += '<div class="meta-item">输出 <span>' + Number(r.outTokens).toLocaleString() + ' token</span></div>';
     if (r.hookSnap) h += '<div class="meta-item">快照 <span>' + r.hookSnap + '</span></div>';
     if (r.hookBody) h += '<div class="meta-item">响应体 <span>' + r.hookBody + '</span></div>';
     h += '</div>';

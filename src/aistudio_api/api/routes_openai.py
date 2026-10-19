@@ -207,7 +207,10 @@ async def openai_list_models():
 
     openai_models = []
     for m in models:
-        model_id = m.name.removeprefix("models/")
+        model_name = m.get("name", "") if isinstance(m, dict) else getattr(m, "name", "")
+        model_id = model_name.removeprefix("models/")
+        if not model_id:
+            continue
         openai_models.append(
             {
                 "id": model_id,
