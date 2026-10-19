@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import json
 import time
 import uuid
@@ -290,7 +292,35 @@ async def _openai_stream(
     display_model: str,
     chat_id: str,
 ) -> AsyncGenerator[str, None]:
-    """流式：内部调用 Gemini 流式接口，转换成 OpenAI SSE 格式输出。"""
+    """流式：内部调用 Gemini 流式接口，转换成 OpenAI SSE 格式输出。
+
+    在等待上游响应期间每 2 秒发送零宽空格心跳，防止 New API / 酒馆连接超时。
+    """
+    HEARTBEAT_INTERVAL = 2  # 秒
+    HEARTBEAT_CHUNK = _make_openai_chunk(chat_id, display_model, {"content": "\u200b"})
+
+    # 心跳队列：后台 task 往里塞心跳，主循环从里面读
+    heartbeat_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    got_real_data = asyncio.Event()
+    done_event = asyncio.Event()
+
+    async def _heartbeat_sender():
+        """后台心跳：收到真正数据前每隔 HEARTBEAT_INTERVAL 发一个零宽空格 chunk。"""
+        # 立刻发第一个心跳，确认 SSE 通道畅通
+        await heartbeat_queue.put(HEARTBEAT_CHUNK)
+        while not done_event.is_set():
+            try:
+                await asyncio.wait_for(done_event.wait(), timeout=HEARTBEAT_INTERVAL)
+                break
+            except asyncio.TimeoutError:
+                if not got_real_data.is_set():
+                    await heartbeat_queue.put(HEARTBEAT_CHUNK)
+                # 收到真正数据后停止心跳（由主循环 set got_real_data）
+                # 但不退出，等 done_event
+        await heartbeat_queue.put(None)  # 哨兵，通知主循环心跳结束
+
+    heartbeat_task = asyncio.create_task(_heartbeat_sender())
+
     # 先发 role chunk
     yield _make_openai_chunk(chat_id, display_model, {"role": "assistant"})
 
@@ -314,8 +344,20 @@ async def _openai_stream(
                 real_model, gemini_req, client, stream=True
             )
 
+        # 在等待上游期间，先把队列里积攒的心跳 yield 出去
+        while not heartbeat_queue.empty():
+            hb = heartbeat_queue.get_nowait()
+            if hb is not None:
+                yield hb
+
         # gemini_resp 是 StreamingResponse，取其 body_iterator
         async for raw_chunk in gemini_resp.body_iterator:
+            # 每次收到数据前，先把心跳队列排空
+            while not heartbeat_queue.empty():
+                hb = heartbeat_queue.get_nowait()
+                if hb is not None:
+                    yield hb
+
             if not raw_chunk or not isinstance(raw_chunk, str):
                 continue
 
@@ -333,7 +375,8 @@ async def _openai_stream(
                     continue
 
                 text = _extract_text_from_gemini(data)
-                if text and text != "\u200b":  # 跳过心跳零宽空格
+                if text and text != "\u200b":  # 跳过 Gemini 层心跳零宽空格
+                    got_real_data.set()  # 收到真正内容，停止心跳
                     yield _make_openai_chunk(
                         chat_id, display_model, {"content": text}
                     )
@@ -345,6 +388,11 @@ async def _openai_stream(
         )
         yield "data: [DONE]\n\n"
         return
+    finally:
+        done_event.set()
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
 
     # 结束
     yield _make_openai_chunk(chat_id, display_model, {}, "stop")
