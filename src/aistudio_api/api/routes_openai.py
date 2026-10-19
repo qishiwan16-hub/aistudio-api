@@ -297,7 +297,7 @@ async def _openai_stream(
     在等待上游响应期间每 2 秒发送零宽空格心跳，防止 New API / 酒馆连接超时。
     """
     HEARTBEAT_INTERVAL = 2  # 秒
-    HEARTBEAT_CHUNK = _make_openai_chunk(chat_id, display_model, {})
+    HEARTBEAT_CHUNK = _make_openai_chunk(chat_id, display_model, {"content": ""})
 
     # 心跳队列：后台 task 往里塞心跳，主循环从里面读
     heartbeat_queue: asyncio.Queue[str | None] = asyncio.Queue()
