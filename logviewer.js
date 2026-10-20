@@ -50,10 +50,10 @@ function parseRequests() {
 
   const reqs = [];
   const reqRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*收到.*请求.*model=(.+)/;
-  const infoRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:流式请求|假流式请求|请求).*model=([^,]+)(?:.*对话轮数=(\d+))?(?:.*尝试第\s*(\d+)\s*次)?/;
+  const infoRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:Gemini 流式请求|Gemini 生成请求|流式请求|假流式请求|抗截断请求|请求).*model=([^,]+)(?:.*对话轮数=(\d+))?(?:.*尝试第\s*(\d+)\s*次)?/;
   const postRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP POST.*models\/([^:/ ]+):.*->\s*(\d+)\s*\(([\d.]+)ms\)/;
   const hookRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*Hook 拦截成功.*model=([^,]+)(?:.*snapshot=(\d+)\s*chars)?(?:.*body=(\d+)\s*chars)?/;
-  const doneRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:假流式生成完成|流式完成).*model=([^,]+)(?:.*输入Tokens=(\d+))?(?:.*输出Tokens=(\d+))?/;
+  const doneRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:假流式生成完成|Gemini 流式完成|Gemini 生成完成|抗截断生成完成|流式完成).*model=([^,]+)(?:.*输入Tokens=(\d+))?(?:.*输出Tokens=(\d+))?(?:.*总内容=(\d+))?/;
   const geminiErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*\[aistudio\.api\.gemini\].*(?:未知严重异常|严重错误|Gemini错误|流式错误)[：:]\s*(.+)/;
   const httpErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP (?:GET|POST)\s+(\S+)\s*->\s*(\d+)\s*\(([\d.]+)ms(?:,\s*(.+))?\)/;
   const errRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:ERROR|error|SAFETY|BLOCKED|HARM|RECITATION|RESOURCE_EXHAUSTED|finish_reason.*(?:SAFETY|RECITATION|OTHER))(.+)/i;
@@ -87,6 +87,9 @@ function parseRequests() {
       if (m[3]) r.turns = m[3];
       if (m[4]) r.retry = '第' + m[4] + '次';
       if (L.includes('假流式')) r.mode = '假流式';
+      else if (L.includes('抗截断')) r.mode = '抗截断';
+      else if (L.includes('Gemini 流式')) r.mode = '流式';
+      else if (L.includes('Gemini 生成')) r.mode = '非流式';
       else if (L.includes('流式')) r.mode = '流式';
       continue;
     }
@@ -140,6 +143,8 @@ function parseRequests() {
       const r = best || ensure(dTime, dModel);
       if (m[3]) r.inTokens = m[3];
       if (m[4]) r.outTokens = m[4];
+      /* 抗截断完成行用 总内容=N字符 而非 Tokens */
+      if (m[5]) r.outTokens = m[5] + '字符';
       r.resultText = '✅ 生成完成';
       /* 计算实际生成耗时（从请求到完成） */
       if (best && bestDiff > 0) r.latency = (bestDiff / 1000).toFixed(1) + 's';
