@@ -225,10 +225,23 @@ async def bootstrap_botguard_and_template(
                     "Google AI Studio 地区限制: 访问被重定向至 available-regions"
                 ) from err
 
+            # AI Studio 页面到了但 textarea 没渲染，刷新重试一次
             dbg_title = await page.title()
-            raise RuntimeError(
-                f"textarea not found while capturing BotGuardService; url={dbg_url}, title={dbg_title}"
-            ) from err
+            log.warning(
+                "textarea 未出现，尝试刷新页面重试: url=%s, title=%s",
+                dbg_url, dbg_title,
+            )
+            try:
+                await page.reload()
+                await page.wait_for_timeout(2000)
+                await page.evaluate(DIALOG_CLEANUP_JS)
+                await page.wait_for_selector("textarea", timeout_s=30.0)
+            except Exception:
+                dbg_url2 = getattr(page, "url", "") or ""
+                dbg_title2 = await page.title()
+                raise RuntimeError(
+                    f"textarea not found after refresh; url={dbg_url2}, title={dbg_title2}"
+                ) from err
 
         original_text = str(
             (
@@ -305,9 +318,42 @@ async def bootstrap_botguard_and_template(
                     await page.evaluate(DOM_GC_CLEANUP_JS)
 
                 if not captured:
-                    raise RuntimeError(
-                        "BotGuard service captured but wire template missing"
+                    # ── 重试一次：重新填写 prompt 并点 Run ──
+                    log.warning(
+                        "wire template missing (iter=%d)，重新填写 prompt 再点一次 Run",
+                        i,
                     )
+                    try:
+                        await page.fill("textarea", BOTGUARD_BOOTSTRAP_PROMPT)
+                        await page.wait_for_timeout(600)
+                        await page.evaluate(DIALOG_CLEANUP_JS)
+                        retry_ok = await click_run_button(page)
+                        log.info("wire template retry click_run_button: %s", retry_ok)
+                        if retry_ok:
+                            for _ in range(20):
+                                if captured:
+                                    break
+                                with suppress(Exception):
+                                    in_page_tpl = await page.evaluate(
+                                        "() => window.__AISTUDIO__?.capturedTemplate || null"
+                                    )
+                                    if (
+                                        isinstance(in_page_tpl, dict)
+                                        and in_page_tpl.get("url")
+                                        and in_page_tpl.get("body")
+                                    ):
+                                        captured["url"] = str(in_page_tpl["url"])
+                                        captured["headers"] = in_page_tpl.get("headers") or {}
+                                        captured["body"] = str(in_page_tpl["body"])
+                                        break
+                                await page.wait_for_timeout(500)
+                    except Exception as retry_err:
+                        log.warning("wire template retry 失败: %s", retry_err)
+
+                    if not captured:
+                        raise RuntimeError(
+                            "BotGuard service captured but wire template missing"
+                        )
 
                 log.info(
                     "BotGuard 握手成功并截获模板，耗时 %d 秒 (累计 %.1f 秒)",
