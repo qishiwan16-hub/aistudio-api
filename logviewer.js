@@ -104,23 +104,29 @@ function parseRequests() {
       continue;
     }
 
-    /* Hook 拦截 - 时间可能差几秒，找最近的同模型请求 */
+    /* Hook 拦截 - 合并回最近的同模型请求（生成可能需要几十秒到几分钟） */
     m = L.match(hookRe);
     if (m) {
       const hTime = m[1], hModel = normModel(m[2].trim());
-      /* 先精确匹配，再找10秒内同模型的最近请求 */
-      let r = map.get(getKey(hTime, hModel));
-      if (!r) {
-        const hTs = Date.parse(hTime.replace(' ','T')+'Z') || 0;
-        let best = null, bestDiff = Infinity;
+      const hTs = Date.parse(hTime.replace(' ','T')+'Z') || 0;
+      /* 找10分钟内同模型、尚未拦截的最近请求 */
+      let best = null, bestDiff = Infinity;
+      for (const v of map.values()) {
+        if (normModel(v.model) === hModel && v.type !== 'hook') {
+          const diff = hTs - v._ts;
+          if (diff >= 0 && diff < 600000 && diff < bestDiff) { best = v; bestDiff = diff; }
+        }
+      }
+      /* 找不到未拦截的，放宽到已拦截的（续传场景） */
+      if (!best) {
         for (const v of map.values()) {
           if (normModel(v.model) === hModel) {
-            const diff = Math.abs(v._ts - hTs);
-            if (diff < 10000 && diff < bestDiff) { best = v; bestDiff = diff; }
+            const diff = hTs - v._ts;
+            if (diff >= 0 && diff < 600000 && diff < bestDiff) { best = v; bestDiff = diff; }
           }
         }
-        r = best || ensure(hTime, hModel);
       }
+      const r = best || ensure(hTime, hModel);
       r.type = 'hook';
       if (m[3]) r.hookSnap = m[3] + ' chars';
       if (m[4]) r.hookBody = m[4] + ' chars';
