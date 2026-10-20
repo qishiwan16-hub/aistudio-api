@@ -503,7 +503,7 @@ async def navigate_to_aistudio(
             _makersuite_ready = False
             for _ in range(60):
                 try:
-                    if await page.evaluate("() => !!window.default_MakerSuite", timeout_s=5):
+                    if await page.evaluate("() => !!window.default_MakerSuite", timeout_s=30):
                         _makersuite_ready = True
                         break
                 except Exception:
@@ -521,7 +521,7 @@ async def navigate_to_aistudio(
                     await page.wait_for_timeout(3000)
                     for _ in range(20):
                         try:
-                            if await page.evaluate("() => !!window.default_MakerSuite", timeout_s=5):
+                            if await page.evaluate("() => !!window.default_MakerSuite", timeout_s=30):
                                 _makersuite_ready = True
                                 break
                         except Exception:
