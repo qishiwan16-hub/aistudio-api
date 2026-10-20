@@ -500,16 +500,34 @@ async def navigate_to_aistudio(
                     )
 
             _eval_timeouts = 0
+            _makersuite_ready = False
             for _ in range(60):
                 try:
                     if await page.evaluate("() => !!window.default_MakerSuite", timeout_s=5):
+                        _makersuite_ready = True
                         break
                 except Exception:
                     _eval_timeouts += 1
                     if _eval_timeouts >= 3:
-                        log.warning("default_MakerSuite 检查连续 %d 次超时，页面可能卡死", _eval_timeouts)
+                        log.warning("default_MakerSuite 检查连续 %d 次超时，页面可能卡死，尝试刷新", _eval_timeouts)
                         break
                 await page.wait_for_timeout(500)
+
+            # 页面卡死时刷新重试一次
+            if not _makersuite_ready and _eval_timeouts >= 3:
+                try:
+                    await page.reload()
+                    await page.wait_for_timeout(3000)
+                    for _ in range(20):
+                        try:
+                            if await page.evaluate("() => !!window.default_MakerSuite", timeout_s=5):
+                                _makersuite_ready = True
+                                break
+                        except Exception:
+                            pass
+                        await page.wait_for_timeout(500)
+                except Exception as reload_err:
+                    log.warning("页面刷新后仍无法恢复: %s", reload_err)
 
             curr_after_wait = getattr(page, "url", "") or ""
             if is_login_page_url(curr_after_wait):
