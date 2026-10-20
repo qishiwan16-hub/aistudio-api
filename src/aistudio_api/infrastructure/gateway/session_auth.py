@@ -508,13 +508,13 @@ async def navigate_to_aistudio(
                         break
                 except Exception:
                     _eval_timeouts += 1
-                    if _eval_timeouts >= 3:
+                    if _eval_timeouts >= 6:
                         log.warning("default_MakerSuite 检查连续 %d 次超时，页面可能卡死，尝试刷新", _eval_timeouts)
                         break
                 await page.wait_for_timeout(500)
 
             # 页面卡死时刷新重试一次
-            if not _makersuite_ready and _eval_timeouts >= 3:
+            if not _makersuite_ready and _eval_timeouts >= 6:
                 try:
                     refresh_url = getattr(page, "url", "") or url
                     await page.goto(refresh_url)
