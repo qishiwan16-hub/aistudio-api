@@ -192,17 +192,38 @@ async def bootstrap_botguard_and_template(
 
     unsub = page.on_request(on_req)
     await page.evaluate(DIALOG_CLEANUP_JS)
-    await page.evaluate(
-        """(() => {
-            const clickable = Array.from(document.querySelectorAll('button, mat-card, a, [role="button"], [role="tab"], .nav-item'));
-            const targets = ['Playground', 'Code and Chat', 'Chat prompt', 'New chat', 'Start building', 'Create prompt'];
-            for (const term of targets) {
-                const target = clickable.find(el => (el.innerText || el.textContent || '').includes(term));
-                if (target) { target.click(); return; }
-            }
-        })()"""
-    )
-    await page.wait_for_timeout(800)
+
+    # 如果已经在 new_chat / prompts 页面，跳过导航按钮点击
+    _cur = getattr(page, "url", "") or ""
+    if "prompts" not in _cur and "new_chat" not in _cur:
+        await page.evaluate(
+            """(() => {
+                const clickable = Array.from(document.querySelectorAll('button, mat-card, a, [role="button"], [role="tab"], .nav-item'));
+                const targets = ['Playground', 'Code and Chat', 'Chat prompt', 'New chat', 'Start building', 'Create prompt'];
+                for (const term of targets) {
+                    const target = clickable.find(el => (el.innerText || el.textContent || '').includes(term));
+                    if (target) { target.click(); return; }
+                }
+            })()"""
+        )
+        await page.wait_for_timeout(800)
+    else:
+        log.debug("已在聊天页面，跳过导航按钮点击: %s", _cur[:80])
+
+    # ── 等待页面 Angular 渲染就绪（textarea 出现即提前跳出）──
+    for _ready_i in range(15):
+        is_ready = await page.evaluate(
+            """() => {
+                if (document.querySelector('textarea')) return 'textarea';
+                if (document.querySelector('.mdc-text-field, .prompt-input, mat-form-field')) return 'form';
+                return '';
+            }""",
+            timeout_s=5,
+        )
+        if is_ready:
+            log.debug("页面就绪检查通过: %s (iter=%d)", is_ready, _ready_i)
+            break
+        await page.wait_for_timeout(1000)
 
     try:
         try:

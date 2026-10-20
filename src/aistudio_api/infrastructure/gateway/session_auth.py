@@ -499,9 +499,15 @@ async def navigate_to_aistudio(
                         f"Cookie 认证失败，重新注入并导航后仍处于登录页。 (url={current_url})"
                     )
 
+            _eval_timeouts = 0
             for _ in range(60):
-                with suppress(Exception):
-                    if await page.evaluate("() => !!window.default_MakerSuite"):
+                try:
+                    if await page.evaluate("() => !!window.default_MakerSuite", timeout_s=5):
+                        break
+                except Exception:
+                    _eval_timeouts += 1
+                    if _eval_timeouts >= 3:
+                        log.warning("default_MakerSuite 检查连续 %d 次超时，页面可能卡死", _eval_timeouts)
                         break
                 await page.wait_for_timeout(500)
 
