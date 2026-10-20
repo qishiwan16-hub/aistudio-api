@@ -247,12 +247,29 @@ async def handle_attempt_exception(
 
     if is_browser_session_hang_error(exc):
         logger.warning(
-            "模板或 BotGuard 捕获超时 (%d/%d): %s，切换账号重试",
+            "模板或 BotGuard 捕获超时 (%d/%d): %s，先尝试原地恢复",
             attempt + 1,
             MAX_RETRIES,
             exc,
         )
         client.clear_templates()
+
+        # ── 优先原地恢复：刷新页面+重新握手，避免浪费切号 ──
+        if not has_yielded_data and client._session is not None:
+            try:
+                recovered = await client._session.try_recover_page()
+                if recovered:
+                    logger.info(
+                        "页面原地恢复成功，原账号重试 (%d/%d)",
+                        attempt + 1,
+                        MAX_RETRIES,
+                    )
+                    return True
+            except Exception as recover_err:
+                logger.warning("原地恢复异常: %s", recover_err)
+
+        # ── 恢复失败，降级到切号 ──
+        logger.warning("原地恢复失败，降级到切换账号重试")
         if not has_yielded_data and await try_switch_account(
             model=target_model, failed_account_id=failed_id, is_auth_error=False
         ):

@@ -166,10 +166,114 @@ class BrowserSession:
         if page is not None and not page.is_closed():
             if await page.is_alive(timeout_s=1.0):
                 return page
-            log.warning("浏览器页面无响应，重新连接...")
+            # Android 后台冻结后首次探活可能超时，给进程回魂的时间再试
+            log.warning("浏览器页面首次探活失败，等待 3 秒后重试唤醒…")
+            await asyncio.sleep(3)
+            if await page.is_alive(timeout_s=5.0):
+                log.info("浏览器页面唤醒成功")
+                return page
+            log.warning("浏览器页面二次探活仍失败，重新连接...")
         await self._close_internal()
         res = await self._ensure_browser_cdp()
         return res or (await self.ensure_ready()).page
+
+    async def try_recover_page(self) -> bool:
+        """尝试原地恢复卡死的页面（刷新+重新握手），避免不必要的切号。
+
+        恢复策略分三级：
+        1. 等待唤醒 — Android 解冻后 JS 引擎可能需要几秒恢复
+        2. 刷新页面 — CDP Page.navigate 重新加载 AI Studio
+        3. 重启浏览器 — Chromium 进程被 Android 杀死时，重新拉起并走完整初始化
+
+        Returns True if recovery succeeded and session is ready again.
+        """
+        # ── 检查浏览器进程是否还活着 ──
+        proc_alive = self._proc is not None and self._proc.is_alive()
+        if not proc_alive:
+            log.warning("try_recover_page: 浏览器进程已死，尝试重启浏览器")
+            return await self._restart_browser_and_reinit()
+
+        page = self.page
+        if page is None or page.is_closed():
+            log.warning("try_recover_page: 页面已关闭，尝试重启浏览器")
+            return await self._restart_browser_and_reinit()
+
+        # 第一步：探活 — 看页面是否只是暂时卡住（Android 解冻恢复）
+        log.info("try_recover_page: 开始原地恢复…先探活")
+        for wait_s in (2, 4, 6):
+            await asyncio.sleep(wait_s)
+            if await page.is_alive(timeout_s=5.0):
+                log.info("try_recover_page: 页面在等待 %ds 后恢复响应", wait_s)
+                return True
+
+        # 第二步：页面仍然卡死，尝试刷新
+        log.warning("try_recover_page: 页面持续无响应，尝试刷新页面")
+        try:
+            refresh_url = getattr(page, 'url', '') or 'https://aistudio.google.com/prompts/new_chat'
+            await page.goto(refresh_url, timeout_s=20.0)
+            await asyncio.sleep(3)
+            if await page.is_alive(timeout_s=5.0):
+                log.info("try_recover_page: 页面刷新后恢复响应，重新执行 BotGuard 握手")
+                try:
+                    return await self._reinit_session_on_page(page)
+                except Exception as e:
+                    log.warning("try_recover_page: 重新握手失败: %s", e)
+        except Exception as e:
+            log.warning("try_recover_page: 页面刷新失败: %s", e)
+
+        # 第三步：刷新也救不回来，重启浏览器进程
+        log.warning("try_recover_page: 刷新无效，降级到重启浏览器")
+        return await self._restart_browser_and_reinit()
+
+    async def _reinit_session_on_page(self, page: CDPPage) -> bool:
+        """在已存活的 page 上重新导航 + BotGuard 握手，重建 SessionContext。"""
+        async def _reload_cb(p: CDPPage) -> bool:
+            return await load_cookies_to_page(p, self._auth_file)
+
+        await load_cookies_to_page(page, self._auth_file)
+        await navigate_to_aistudio(
+            page,
+            auth_user=self.get_current_auth_user(),
+            auth_file=self._auth_file,
+        )
+        snap_key, base_template = await bootstrap_botguard_and_template(
+            page,
+            reload_cookies_cb=_reload_cb,
+            is_proc_alive_cb=lambda: self._proc is None or self._proc.is_alive(),
+        )
+        ctx = SessionContext(
+            page=page,
+            snap_key=snap_key,
+            auth_user=self.get_current_auth_user(),
+            auth_file=self._auth_file,
+            base_template=base_template,
+            tier=self.get_current_tier(),
+        )
+        self._gate.set_ready(ctx)
+        log.info("_reinit_session_on_page: 会话重新初始化成功")
+        return True
+
+    async def _restart_browser_and_reinit(self) -> bool:
+        """重启浏览器进程并用当前账号重新初始化会话。"""
+        try:
+            log.info("_restart_browser_and_reinit: 正在关闭旧浏览器…")
+            await self._close_internal()
+            log.info("_restart_browser_and_reinit: 正在重新启动浏览器…")
+            new_page = await self._ensure_browser_cdp()
+            if new_page is None:
+                # _ensure_browser_cdp 返回 None 说明 CDPClient 已存在且连接了页面
+                if self._cdp_client is not None:
+                    new_page = await self._cdp_client.connect_page(block_assets=True)
+            if new_page is None:
+                log.error("_restart_browser_and_reinit: 无法获取新页面")
+                return False
+            new_page.set_liveness_checker(
+                lambda: self._proc is None or self._proc.is_alive()
+            )
+            return await self._reinit_session_on_page(new_page)
+        except Exception as e:
+            log.error("_restart_browser_and_reinit: 重启浏览器失败: %s", e)
+            return False
 
     async def is_alive(self, timeout_s: float = 1.5) -> bool:
         if self._proc is not None and not self._proc.is_alive():
