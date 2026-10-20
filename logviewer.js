@@ -144,7 +144,7 @@ function parseRequests() {
       if (m[3]) r.inTokens = m[3];
       if (m[4]) r.outTokens = m[4];
       /* 抗截断完成行用 总内容=N字符 而非 Tokens */
-      if (m[5]) r.outTokens = m[5] + '字符';
+      if (m[5]) { r.outTokens = m[5]; r._outUnit = '字符'; }
       r.resultText = '✅ 生成完成';
       /* 计算实际生成耗时（从请求到完成） */
       if (best && bestDiff > 0) r.latency = (bestDiff / 1000).toFixed(1) + 's';

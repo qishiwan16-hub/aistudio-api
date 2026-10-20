@@ -181,7 +181,7 @@ function render() {
     if (r.retry) h += '<div class="meta-item">重试 <span>' + esc(r.retry) + '</span></div>';
     if (r.latency) h += '<div class="meta-item">耗时 <span>' + r.latency + '</span></div>';
     if (r.inTokens) h += '<div class="meta-item">输入 <span>' + Number(r.inTokens).toLocaleString() + ' token</span></div>';
-    if (r.outTokens) h += '<div class="meta-item">输出 <span>' + Number(r.outTokens).toLocaleString() + ' token</span></div>';
+    if (r.outTokens) h += '<div class="meta-item">输出 <span>' + Number(r.outTokens).toLocaleString() + ' ' + (r._outUnit || 'token') + '</span></div>';
     if (r.hookSnap) h += '<div class="meta-item">快照 <span>' + r.hookSnap + '</span></div>';
     if (r.hookBody) h += '<div class="meta-item">响应体 <span>' + r.hookBody + '</span></div>';
     h += '</div>';
