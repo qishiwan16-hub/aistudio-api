@@ -219,6 +219,16 @@ async def openai_list_models():
                 "owned_by": "google",
             }
         )
+        # 生成假流式和抗截断变体
+        for prefix in ("假流式-", "抗截断-"):
+            openai_models.append(
+                {
+                    "id": f"{prefix}{model_id}",
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "google",
+                }
+            )
     return {"object": "list", "data": openai_models}
 
 
