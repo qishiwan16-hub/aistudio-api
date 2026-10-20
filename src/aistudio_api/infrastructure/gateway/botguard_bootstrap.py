@@ -253,7 +253,8 @@ async def bootstrap_botguard_and_template(
                 dbg_url, dbg_title,
             )
             try:
-                await page.reload()
+                refresh_url = getattr(page, "url", "") or "https://aistudio.google.com/prompts/new_chat"
+                await page.goto(refresh_url)
                 await page.wait_for_timeout(2000)
                 await page.evaluate(DIALOG_CLEANUP_JS)
                 await page.wait_for_selector("textarea", timeout_s=30.0)

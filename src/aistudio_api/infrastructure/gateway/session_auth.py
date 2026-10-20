@@ -516,7 +516,8 @@ async def navigate_to_aistudio(
             # 页面卡死时刷新重试一次
             if not _makersuite_ready and _eval_timeouts >= 3:
                 try:
-                    await page.reload()
+                    refresh_url = getattr(page, "url", "") or url
+                    await page.goto(refresh_url)
                     await page.wait_for_timeout(3000)
                     for _ in range(20):
                         try:
