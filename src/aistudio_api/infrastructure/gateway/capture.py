@@ -114,8 +114,8 @@ class RequestCaptureService:
         return captured
 
     async def _ensure_template(self, model: str) -> CapturedRequest:
-        ctx = self._session.active_context
-        ctx_id = ctx.context_id if ctx else None
+        ctx = await self._session.ensure_ready()
+        ctx_id = ctx.context_id
         if self._active_ctx_id != ctx_id:
             self._templates.clear()
             self._active_ctx_id = ctx_id
