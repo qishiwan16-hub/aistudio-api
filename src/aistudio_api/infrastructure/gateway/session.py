@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 from hashlib import sha256
@@ -83,7 +82,6 @@ class BrowserSession:
         self._retiring_contexts: list[SessionContext] = []
         self._background_tasks: set[asyncio.Task[object]] = set()
         self._in_flight: int = 0
-        self._last_activity_time: float = time.time()
         self._stream_cleanup_count: int = 0
 
     @property
@@ -136,9 +134,8 @@ class BrowserSession:
 
     @asynccontextmanager
     async def request_scope(self):
-        """追踪活动请求并更新活跃时间戳。"""
+        """追踪活动请求。"""
         self._in_flight += 1
-        self._last_activity_time = time.time()
         ctx = self.active_context
         if ctx is not None:
             ctx.in_flight += 1
@@ -148,7 +145,6 @@ class BrowserSession:
             self._in_flight = max(0, self._in_flight - 1)
             if ctx is not None:
                 ctx.decr_in_flight()
-            self._last_activity_time = time.time()
 
     async def ensure_ready(self, timeout_s: float = 60.0) -> SessionContext:
         """Wait until session is 100% READY."""
@@ -294,26 +290,6 @@ class BrowserSession:
             return False
         return await page.is_alive(timeout_s=timeout_s)
 
-    async def check_idle_timeout(self) -> bool:
-        idle_timeout = getattr(settings, "browser_idle_timeout", 0)
-        if idle_timeout <= 0:
-            return False
-        if (
-            self._in_flight <= 0
-            and self._proc is not None
-            and self._gate.state != SessionState.PREPARING
-        ):
-            idle_duration = time.time() - self._last_activity_time
-            if idle_duration >= idle_timeout:
-                log.info(
-                    "浏览器已空闲 %.1f 秒 (阈值=%d 秒)，回收进程释放内存",
-                    idle_duration,
-                    idle_timeout,
-                )
-                await self.close()
-                return True
-        return False
-
     async def switch_auth(self, auth_file: str | None) -> None:
         """Switch auth using blue-green transition without killing in-flight streams."""
         await self.transition_to_account(auth_file, force_refresh=True)
@@ -331,7 +307,6 @@ class BrowserSession:
             ):
                 return self._gate.active_context
 
-            self._last_activity_time = time.time()
             self._gate.set_preparing()
             old_context = self._gate.active_context
             target_auth_user = get_auth_user_from_meta(auth_file)
@@ -417,9 +392,12 @@ class BrowserSession:
         active_target_id: str | None = None,
         max_wait_s: float = 12.0,
     ) -> None:
-        if context.in_flight > 0:
+        while context.in_flight > 0:
             with suppress(TimeoutError):
                 await asyncio.wait_for(context.drain_event.wait(), timeout=max_wait_s)
+                break
+            if context.page.is_closed():
+                break
 
         with suppress(Exception):
             if context in self._retiring_contexts:
@@ -648,9 +626,6 @@ class BrowserSession:
         if profile_dir:
             Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
-        # 冷启动浏览器需 ~20s，期间 _proc 已非空但请求可能尚未进入 request_scope()；
-        # 启动即刷新活跃时间戳，防止空闲回收器按旧时间戳误杀刚拉起的浏览器进程。
-        self._last_activity_time = time.time()
         self._proc = launch_chromium_process(
             port=self.port,
             user_data_dir=profile_dir,

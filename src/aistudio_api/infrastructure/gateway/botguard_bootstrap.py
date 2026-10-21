@@ -314,10 +314,8 @@ async def bootstrap_botguard_and_template(
                             captured["url"] = str(in_page_tpl["url"])
                             captured["headers"] = in_page_tpl.get("headers") or {}
                             captured["body"] = str(in_page_tpl["body"])
-                with suppress(Exception):
-                    await page.evaluate(STOP_GENERATION_JS)
                 if not captured:
-                    for _ in range(25):
+                    for _ in range(40):
                         if captured:
                             break
                         with suppress(Exception):
@@ -335,6 +333,8 @@ async def bootstrap_botguard_and_template(
                                 break
                         await page.wait_for_timeout(100)
                     log.info("等待 CDP 事件后 captured=%s", bool(captured))
+                with suppress(Exception):
+                    await page.evaluate(STOP_GENERATION_JS)
                 await page.fill("textarea", original_text)
                 with suppress(Exception):
                     await page.evaluate(DOM_GC_CLEANUP_JS)
