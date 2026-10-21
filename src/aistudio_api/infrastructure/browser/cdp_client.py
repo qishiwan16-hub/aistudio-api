@@ -83,11 +83,6 @@ class CDPConnection:
         self._recv_task: asyncio.Task[None] | None = None
         self._background_tasks: set[asyncio.Task[object]] = set()
         self._closed = False
-        self._liveness_checker: Callable[[], bool] | None = None
-
-    def set_liveness_checker(self, checker: Callable[[], bool] | None) -> None:
-        """Register a callback that returns False if the underlying browser process is dead."""
-        self._liveness_checker = checker
 
     def fail_pending_futures(self, exc: Exception) -> None:
         """Immediately fail all pending command futures with the given exception."""
@@ -103,8 +98,8 @@ class CDPConnection:
             websockets.connect(
                 self.ws_url,
                 max_size=None,
-                ping_interval=5,
-                ping_timeout=5,
+                ping_interval=None,
+                ping_timeout=None,
             ),
             timeout=timeout_s,
         )
@@ -204,10 +199,6 @@ class CDPConnection:
         if not self.ws or self._closed:
             raise RuntimeError("CDP connection is not open")
 
-        if self._liveness_checker and not self._liveness_checker():
-            self.fail_pending_futures(RuntimeError("Browser process has died"))
-            raise RuntimeError("Browser process has died before CDP command dispatch")
-
         req_id = self._next_id
         self._next_id += 1
 
@@ -228,30 +219,7 @@ class CDPConnection:
             raise RuntimeError(f"CDP connection closed: {e}") from e
 
         try:
-            if self._liveness_checker is None:
-                return await asyncio.wait_for(fut, timeout=timeout_s)
-
-            deadline = loop.time() + timeout_s
-            while True:
-                if not self._liveness_checker():
-                    self.fail_pending_futures(RuntimeError("Browser process has died"))
-                    raise RuntimeError(
-                        f"Browser process died while awaiting CDP command {method}"
-                    )
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    self._futures.pop(req_id, None)
-                    raise TimeoutError(
-                        f"CDP command {method} timed out after {timeout_s}s"
-                    )
-                step_timeout = min(remaining, 0.2)
-                try:
-                    return await asyncio.wait_for(
-                        asyncio.shield(fut), timeout=step_timeout
-                    )
-                except TimeoutError:
-                    if fut.done():
-                        return fut.result()
+            return await asyncio.wait_for(fut, timeout=timeout_s)
         except Exception:
             self._futures.pop(req_id, None)
             raise
@@ -329,10 +297,6 @@ class CDPPage:
             return bool(res and not res.get("exceptionDetails"))
         except Exception:
             return False
-
-    def set_liveness_checker(self, checker: Callable[[], bool] | None) -> None:
-        """Bind underlying browser process liveness checker to CDP connection."""
-        self.cdp.set_liveness_checker(checker)
 
     async def init_domains(self, block_assets: bool = True) -> None:
         """Enable required CDP domains and install kernel-level asset filters."""

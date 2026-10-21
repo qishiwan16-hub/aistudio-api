@@ -281,9 +281,6 @@ class BrowserSession:
             if new_page is None:
                 log.error("_restart_browser_and_reinit: 无法获取新页面")
                 return False
-            new_page.set_liveness_checker(
-                lambda: self._proc is None or self._proc.is_alive()
-            )
             return await self._reinit_session_on_page(new_page)
         except Exception as e:
             log.error("_restart_browser_and_reinit: 重启浏览器失败: %s", e)
@@ -356,9 +353,6 @@ class BrowserSession:
                     new_page = await self._cdp_client.create_new_page(block_assets=True)
                 else:
                     new_page = await self._cdp_client.connect_page(block_assets=True)
-                new_page.set_liveness_checker(
-                    lambda: self._proc is None or self._proc.is_alive()
-                )
 
                 await load_cookies_to_page(new_page, auth_file)
                 await navigate_to_aistudio(
