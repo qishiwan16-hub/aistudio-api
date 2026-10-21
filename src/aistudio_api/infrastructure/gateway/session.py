@@ -200,13 +200,27 @@ class BrowserSession:
 
         # 第一步：探活 — 看页面是否只是暂时卡住（Android 解冻恢复）
         log.info("try_recover_page: 开始原地恢复…先探活")
+        alive = False
         for wait_s in (2, 4, 6):
             await asyncio.sleep(wait_s)
             if await page.is_alive(timeout_s=5.0):
                 log.info("try_recover_page: 页面在等待 %ds 后恢复响应", wait_s)
-                return True
+                alive = True
+                break
 
-        # 第二步：页面仍然卡死，尝试刷新
+        # 探活成功 → 重新握手（BotGuard 上下文可能已损坏）
+        if alive:
+            log.info("try_recover_page: 探活成功，重新执行 BotGuard 握手")
+            try:
+                ok = await self._reinit_session_on_page(page)
+                if ok:
+                    log.info("try_recover_page: 探活+重新握手成功")
+                    return True
+                log.warning("try_recover_page: 探活成功但重新握手返回 False")
+            except Exception as e:
+                log.warning("try_recover_page: 探活成功但重新握手异常: %s", e)
+
+        # 第二步：页面仍然卡死或握手失败，尝试刷新
         log.warning("try_recover_page: 页面持续无响应，尝试刷新页面")
         try:
             refresh_url = getattr(page, 'url', '') or 'https://aistudio.google.com/prompts/new_chat'
