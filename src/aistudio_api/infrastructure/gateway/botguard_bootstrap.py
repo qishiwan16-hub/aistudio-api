@@ -39,8 +39,8 @@ async def install_page_hooks(page: CDPPage) -> str:
     if isinstance(result, str) and result.startswith("hooked:"):
         return result.split(":", 1)[1]
 
-    for _ in range(8):
-        await page.wait_for_timeout(2500)
+    for _ in range(20):
+        await page.wait_for_timeout(3000)
         curr_url = getattr(page, "url", "") or ""
         if is_login_page_url(curr_url):
             raise SessionExpiredError(
