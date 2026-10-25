@@ -21,8 +21,8 @@ class TopLevelIndex(IntEnum):
     TOOLS = 6
     EVERGREEN_MODEL_URI = 7
     REQUEST_FLAG = 10
-    CACHED_CONTENT = 11
-    LOCATION = 13
+    SESSION_TOKEN = 11
+    REQUEST_CONTEXT = 13
 
 
 class PartIndex(IntEnum):
@@ -60,6 +60,7 @@ class GenerationConfigIndex(IntEnum):
     IMAGE_OUTPUT_MODE = 14
     THINKING_CONFIG = 16
     MEDIA_RESOLUTION = 17
+    SEED = 18
     OUTPUT_RESOLUTION = 26
 
 
@@ -121,3 +122,6 @@ class JspbArray(list):
         while res and res[-1] is None:
             res.pop()
         return res
+
+
+WIRE_FINISH_REASON_CONTINUING = 22

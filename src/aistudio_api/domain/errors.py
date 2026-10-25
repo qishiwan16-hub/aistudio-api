@@ -27,6 +27,12 @@ class RequestError(AistudioError):
         super().__init__(f"HTTP {status}: {message}" if message else f"HTTP {status}")
 
 
+class BrowserTransportError(RuntimeError):
+    """In-page fetch/XHR network transport failure before upstream HTTP completion."""
+
+    net_evidence: list[dict[str, object]] | None = None
+
+
 GRPC_CODE_TO_HTTP: dict[int, int] = {
     1: 499,  # CANCELLED
     2: 500,  # UNKNOWN
@@ -60,6 +66,7 @@ def parse_upstream_grpc_error(raw_response: str) -> tuple[int | None, str]:
     try:
         data = json.loads(normalized)
         if isinstance(data, list):
+
             def _find_grpc(obj: object) -> tuple[int | None, str] | None:
                 if isinstance(obj, list):
                     if (
@@ -77,7 +84,9 @@ def parse_upstream_grpc_error(raw_response: str) -> tuple[int | None, str]:
                     err = obj.get("error")
                     if isinstance(err, dict) and "message" in err:
                         code = err.get("code")
-                        return (int(code) if isinstance(code, (int, float)) else None), str(err["message"])
+                        return (
+                            int(code) if isinstance(code, (int, float)) else None
+                        ), str(err["message"])
                 return None
 
             found = _find_grpc(data)
@@ -100,6 +109,8 @@ def classify_error(status: int, body: str) -> AistudioError:
         return AuthError(f"禁止访问: {clean_msg}")
     effective_status = GRPC_CODE_TO_HTTP.get(grpc_code, status) if grpc_code else status
     return RequestError(effective_status, clean_msg)
+
+
 def is_transient_rpc_error(exc: Exception) -> bool:
     """识别 Google 上游偶发且完全随机的 RPC 路由 404 (Ambiguous request for service)。"""
     if isinstance(exc, RequestError) and exc.status == 404:
@@ -109,7 +120,9 @@ def is_transient_rpc_error(exc: Exception) -> bool:
 
 
 def is_browser_session_hang_error(exc: Exception) -> bool:
-    """识别由于 CDP 断开、模板捕获超时或 BotGuard 握手未就绪引起的会话挂起异常。"""
+    """识别由于 CDP 断开、模板捕获超时、页面传输中断或 BotGuard 握手未就绪引起的会话异常。"""
+    if isinstance(exc, BrowserTransportError):
+        return True
     if isinstance(exc, (RuntimeError, TimeoutError)):
         err = str(exc).lower()
         return any(
@@ -121,6 +134,8 @@ def is_browser_session_hang_error(exc: Exception) -> bool:
                 "cdp",
                 "closed",
                 "aborted",
+                "snapshot",
+                "hook install",
             )
         )
     return False

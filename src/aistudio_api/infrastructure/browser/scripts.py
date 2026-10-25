@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 from pathlib import Path
 
 _JS_DIR = Path(__file__).resolve().parent / "js"
+_GZIP_MIN_BYTES = 96 * 1024
 
 
 def _load_js(filename: str) -> str:
@@ -29,10 +32,9 @@ def build_streaming_init_args(
 ) -> dict[str, object]:
     """Prepare argument object for STREAMING_INIT_JS evaluation."""
     return {
-        "url": url,
-        "headers": headers,
-        "body": body,
-        "timeout": timeout_s,
+        **build_hooked_request_args(
+            url=url, headers=headers, body=body, timeout_s=timeout_s
+        ),
         "rid": rid,
     }
 
@@ -41,12 +43,34 @@ def build_hooked_request_args(
     *, url: str, headers: dict[str, str], body: str, timeout_s: float
 ) -> dict[str, object]:
     """Prepare argument object for HOOKED_REQUEST_JS evaluation."""
-    return {
+    args: dict[str, object] = {
         "url": url,
         "headers": headers,
         "body": body,
         "timeout": timeout_s,
     }
+    if any(
+        key.lower() == "content-encoding" and value.lower() != "identity"
+        for key, value in headers.items()
+    ):
+        return args
+    raw = body.encode("utf-8")
+    if len(raw) >= _GZIP_MIN_BYTES:
+        args["body"] = base64.b64encode(gzip.compress(raw, compresslevel=6)).decode(
+            "ascii"
+        )
+        args["headers"] = {
+            **{
+                key: value
+                for key, value in headers.items()
+                if key.lower() != "content-encoding"
+            },
+            "Content-Encoding": "gzip",
+        }
+        args["gzip"] = True
+    return args
+
+
 def build_selector_match_js(selector: str) -> str:
     """Generate in-page element query snippet for standard CSS, text=, or :has-text() selector."""
     return f"""(() => {{

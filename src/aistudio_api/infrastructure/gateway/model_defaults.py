@@ -279,7 +279,7 @@ def _default_config() -> dict[str, object]:
             "profiles": [
                 {
                     "name": "image_models",
-                    "match": {"contains": ["image"]},
+                    "match": {"contains": ["image", "imagen"]},
                     "is_image_model": True,
                     "generation_config_defaults": {
                         "response_mime_type": None,
@@ -287,6 +287,11 @@ def _default_config() -> dict[str, object]:
                         "thinking_config": {"level": "MINIMAL", "mode": 1},
                     },
                     "clear_generation_config_indexes": [7, 13, 17],
+                    "disable_safety_settings": True,
+                },
+                {
+                    "name": "video_models",
+                    "match": {"prefixes": ["veo-"], "contains": ["veo"]},
                     "disable_safety_settings": True,
                 },
                 {
@@ -313,6 +318,113 @@ def _default_config() -> dict[str, object]:
             ],
             "models": {},
         },
+        "rotator": {
+            "max_retries": 5,
+            "strategy": "sticky",
+            "stickiness_bonus": 400.0,
+            "stickiness_threshold": 0.8,
+            "drip_penalty": 500.0,
+            "tier_weights": {
+                "Free": 0.0,
+                "Plus": 0.5,
+                "Pro": 1.0,
+                "Ultra": 2.0,
+                "Ultra_20X": 3.0,
+            },
+            "cooldowns": {
+                "rate_limited_short": 60,
+                "rate_limited_drip": 300,
+                "rate_limited_drip_extended": 600,
+                "auth_error": 300,
+            },
+        },
+        "paid_model_rules": {
+            "ultra_required": {
+                "contains": ["veo", "ultra"],
+                "required_tiers": ["Ultra", "Ultra_20X"],
+            },
+            "pro_required": {
+                "contains": ["argon", "gemini-4", "image", "imagen"],
+                "required_tiers": ["Pro", "Ultra", "Ultra_20X"],
+            },
+        },
+        "tier_quotas": {
+            "Free": {
+                "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 100},
+                "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 10},
+                "default_limit": 20,
+            },
+            "Plus": {
+                "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 300},
+                "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 30},
+                "default_limit": 50,
+            },
+            "Pro": {
+                "argon_models": {"match": {"contains": ["argon", "gemini-4"]}, "daily_limit": 50},
+                "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 150},
+                "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 50},
+                "image_models": {"match": {"contains": ["image", "imagen"]}, "daily_limit": 50},
+                "default_limit": 50,
+            },
+            "Ultra": {
+                "argon_models": {"match": {"contains": ["argon", "gemini-4"]}, "daily_limit": 250},
+                "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 1500},
+                "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 250},
+                "image_models": {"match": {"contains": ["image", "imagen"]}, "daily_limit": 250},
+                "video_models": {"match": {"contains": ["veo"]}, "daily_limit": 50},
+                "default_limit": 250,
+            },
+            "Ultra_20X": {
+                "argon_models": {"match": {"contains": ["argon", "gemini-4"]}, "daily_limit": 1000},
+                "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 5000},
+                "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 1000},
+                "image_models": {"match": {"contains": ["image", "imagen"]}, "daily_limit": 1000},
+                "video_models": {"match": {"contains": ["veo"]}, "daily_limit": 200},
+                "default_limit": 1000,
+            },
+            "overrides": {},
+        },
+        "account_presets": [
+            {
+                "id": "preset_all",
+                "name": "全部启用 (最大并发)",
+                "description": "激活所有可用账号，提供最充沛的并发与负载池",
+                "action": "enable_all",
+                "is_system": True,
+            },
+            {
+                "id": "preset_paid_only",
+                "name": "纯高阶付费池 (Plus/Pro/Ultra)",
+                "description": "仅激活具有付费权益的账号，全力保障高阶模型调用",
+                "action": "filter_tier",
+                "target_tiers": ["Plus", "Pro", "Ultra", "Ultra_20X"],
+                "is_system": True,
+            },
+            {
+                "id": "preset_ultra_only",
+                "name": "旗舰专属池 (Ultra 独占)",
+                "description": "仅激活 Ultra 顶级算力账号，保障最顶尖模型调用",
+                "action": "filter_tier",
+                "target_tiers": ["Ultra", "Ultra_20X"],
+                "is_system": True,
+            },
+            {
+                "id": "preset_free_only",
+                "name": "纯免费节能池 (Free)",
+                "description": "仅激活 Free 等级账号，用于日常普通模型测试",
+                "action": "filter_tier",
+                "target_tiers": ["Free"],
+                "is_system": True,
+            },
+            {
+                "id": "preset_production",
+                "name": "生产专属集群 (Production)",
+                "description": "仅激活 group 标记为 production 的核心业务账号",
+                "action": "filter_group",
+                "target_groups": ["production"],
+                "is_system": True,
+            },
+        ],
     }
 
 
@@ -536,3 +648,137 @@ def update_configured_logging_settings(
     )
     invalidate_config_cache()
     return logging_dict
+
+
+# ─── 订阅层级每日软额度 (Tier Quotas) 与预设方案 (Presets) ───
+def get_configured_tier_quotas(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """获取 config.yaml 中配置的订阅层级软额度规则，若缺失则安全回退至系统默认配置。"""
+    resolved_path = _resolve_config_path(config_path)
+    config = _load_yaml_config(resolved_path)
+    raw_quotas = config.get("tier_quotas")
+    if isinstance(raw_quotas, dict):
+        return raw_quotas
+    def_quotas = _default_config().get("tier_quotas")
+    if isinstance(def_quotas, dict):
+        return def_quotas
+    return {}
+
+
+def resolve_tier_quota(
+    tier: str | None,
+    model: str | None,
+    config_path: str | os.PathLike[str] | None = None,
+) -> int:
+    """计算指定账号层级在目标模型上的每日软额度限制（仅用于轮询打分权重，超额绝不禁用账号）。"""
+    normalized_model = _normalize_model_name(model) if model else ""
+    quotas = get_configured_tier_quotas(config_path)
+
+    # 1. 精确模型覆盖 overrides (优先级最高)
+    raw_overrides = quotas.get("overrides")
+    if isinstance(raw_overrides, dict):
+        for m_key, val in raw_overrides.items():
+            if _normalize_model_name(str(m_key)) == normalized_model:
+                try:
+                    return int(str(val))
+                except (ValueError, TypeError):
+                    pass
+
+    # 2. 匹配对应层级规则
+    clean_tier = (tier or "Free").strip()
+    if clean_tier not in quotas:
+        matched_key = None
+        for k in quotas:
+            if k.lower() == clean_tier.lower():
+                matched_key = k
+                break
+        if matched_key:
+            clean_tier = matched_key
+        elif "Free" in quotas:
+            clean_tier = "Free"
+        else:
+            clean_tier = next(iter(quotas), "Free")
+
+    tier_rules = quotas.get(clean_tier)
+    if not isinstance(tier_rules, dict):
+        return 20
+
+    default_limit = int(str(tier_rules.get("default_limit", 20)))
+    if not normalized_model:
+        return default_limit
+
+    for rule_key, rule_data in tier_rules.items():
+        if rule_key == "default_limit" or not isinstance(rule_data, dict):
+            continue
+        raw_match = rule_data.get("match")
+        if isinstance(raw_match, dict):
+            contains = [
+                str(c).lower()
+                for c in (raw_match.get("contains") or [])
+                if isinstance(c, str)
+            ]
+            prefixes = [
+                str(p).lower()
+                for p in (raw_match.get("prefixes") or [])
+                if isinstance(p, str)
+            ]
+            exact = [
+                _normalize_model_name(str(e))
+                for e in (raw_match.get("exact") or [])
+                if isinstance(e, str)
+            ]
+            if (
+                (exact and normalized_model in exact)
+                or any(normalized_model.startswith(p) for p in prefixes)
+                or any(c in normalized_model for c in contains)
+            ):
+                return int(str(rule_data.get("daily_limit", default_limit)))
+
+    return default_limit
+
+
+def get_configured_presets(
+    config_path: str | os.PathLike[str] | None = None,
+) -> list[dict[str, object]]:
+    """获取 config.yaml 中配置的预设方案列表。"""
+    resolved_path = _resolve_config_path(config_path)
+    config = _load_yaml_config(resolved_path)
+    raw_presets = config.get("account_presets")
+    if isinstance(raw_presets, list):
+        return [p for p in raw_presets if isinstance(p, dict)]
+    def_presets = _default_config().get("account_presets")
+    if isinstance(def_presets, list):
+        return [p for p in def_presets if isinstance(p, dict)]
+    return []
+
+
+def get_configured_rotator_settings(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """获取 config.yaml 中配置的 rotator 调度策略、打分权重与冷却时间，若缺失安全回退至系统默认配置。"""
+    resolved_path = _resolve_config_path(config_path)
+    config = _load_yaml_config(resolved_path)
+    raw_rotator = config.get("rotator")
+    if isinstance(raw_rotator, dict):
+        return raw_rotator
+    def_rotator = _default_config().get("rotator")
+    if isinstance(def_rotator, dict):
+        return def_rotator
+    return {}
+
+
+def get_configured_paid_model_rules(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """获取 config.yaml 中配置的 paid_model_rules 付费模型判定与准入规则，若缺失安全回退至系统默认配置。"""
+    resolved_path = _resolve_config_path(config_path)
+    config = _load_yaml_config(resolved_path)
+    raw_rules = config.get("paid_model_rules")
+    if isinstance(raw_rules, dict):
+        return raw_rules
+    def_rules = _default_config().get("paid_model_rules")
+    if isinstance(def_rules, dict):
+        return def_rules
+    return {}
+    return raw_rules

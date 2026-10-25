@@ -4,9 +4,13 @@ from aistudio_api.api.responses import (
     to_gemini_parts,
     to_gemini_usage_metadata,
 )
-from aistudio_api.application.api_service_gemini import classify_gemini_error_payload
+from aistudio_api.application.api_service_gemini import (
+    classify_gemini_error_payload,
+    to_gemini_finish_reason,
+)
 from aistudio_api.domain.errors import (
     AuthError,
+    BrowserTransportError,
     RequestError,
     SessionExpiredError,
     UsageLimitExceeded,
@@ -29,6 +33,21 @@ def test_to_gemini_usage_metadata_uses_visible_and_reasoning_tokens():
         "candidatesTokenCount": 316,
         "thoughtsTokenCount": 290,
         "totalTokenCount": 325,
+        "cachedContentTokenCount": None,
+    }
+    assert to_gemini_usage_metadata(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "cached_tokens": 80,
+        }
+    ).model_dump(mode="json", exclude_none=True) == {
+        "promptTokenCount": 100,
+        "candidatesTokenCount": 20,
+        "thoughtsTokenCount": 0,
+        "totalTokenCount": 120,
+        "cachedContentTokenCount": 80,
     }
 
 
@@ -108,6 +127,24 @@ def test_classify_gemini_error_payload():
         "Invalid value (), Unexpected list for single non-message field.",
         "INVALID_ARGUMENT",
     )
+    assert classify_gemini_error_payload(
+        BrowserTransportError("streaming request failed: Failed to fetch")
+    ) == (
+        502,
+        "streaming request failed: Failed to fetch",
+        "UNAVAILABLE",
+    )
+
+
+def test_to_gemini_finish_reason_mappings():
+    assert to_gemini_finish_reason(None) == "STOP"
+    assert to_gemini_finish_reason(1) == "STOP"
+    assert to_gemini_finish_reason(5) == "OTHER"
+    assert to_gemini_finish_reason(6) == "LANGUAGE"
+    assert to_gemini_finish_reason(15) == "IMAGE_OTHER"
+    assert to_gemini_finish_reason(16) == "NO_IMAGE"
+    assert to_gemini_finish_reason(17) == "IMAGE_RECITATION"
+    assert to_gemini_finish_reason(18) == "MISSING_THOUGHT_SIGNATURE"
 
 
 def test_clean_upstream_error_message():
@@ -179,6 +216,7 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
             has_yielded_data=True,
         )
 
+
 @pytest.mark.asyncio
 async def test_build_gemini_streaming_response_passes_requested_model():
     from unittest.mock import MagicMock
@@ -202,7 +240,9 @@ async def test_build_gemini_streaming_response_passes_requested_model():
         yield ("finish_reason", "STOP")
 
     mock_client = MagicMock(spec=AIStudioClient)
-    mock_client.stream_generate_content = MagicMock(side_effect=fake_stream_generate_content)
+    mock_client.stream_generate_content = MagicMock(
+        side_effect=fake_stream_generate_content
+    )
 
     req = GeminiGenerateContentRequest(
         contents=[GeminiContent(role="user", parts=[GeminiPart(text="hello")])]
@@ -248,7 +288,9 @@ async def test_streaming_metadata_event_does_not_block_failover():
         yield ("finish_reason", "STOP")
 
     mock_client = MagicMock(spec=AIStudioClient)
-    mock_client.stream_generate_content = MagicMock(side_effect=fake_stream_generate_content)
+    mock_client.stream_generate_content = MagicMock(
+        side_effect=fake_stream_generate_content
+    )
     mock_client.clear_templates = MagicMock()
 
     req = GeminiGenerateContentRequest(

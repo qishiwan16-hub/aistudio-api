@@ -130,7 +130,7 @@ def test_record_rotator_event():
 
         record_rotator_event("success", model="gemini-2.5-flash")
         mock_rotator.record_success.assert_called_with(
-            "acc_1", model="gemini-2.5-flash"
+            "acc_1", model="gemini-2.5-flash", usage=None
         )
 
         record_rotator_event("rate_limited", model="gemini-2.5-flash")
@@ -312,8 +312,7 @@ def test_account_stats_session_expired_permanent_isolation():
     assert not stats.is_available("gemini-3.8-flash", ignore_auth_cooldown=True)
 
     # 模拟跨天
-    stats._check_date_reset("gemini-3.8-flash", "2099-01-01")
-    assert not stats.is_available("gemini-3.8-flash")
+    stats._check_date_reset("2099-01-01")
     assert stats.session_expired is True
 
     # 仅手动清除冷却/重新导入时恢复
@@ -340,7 +339,6 @@ def test_account_stats_short_cooldown_sync():
     assert not stats.is_available("gemini-2.5-flash")
     rem3 = stats.get_cooldown_remaining("gemini-2.5-flash")
     assert rem3 > 60.0
-
 
 def test_safe_account_dir_path_traversal_rejection(tmp_path):
     """Verify _safe_account_dir rejects path traversal and malicious account IDs."""

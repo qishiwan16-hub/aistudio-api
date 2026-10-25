@@ -11,6 +11,8 @@ import {
   Users,
   Activity,
   AlertTriangle,
+  Brain,
+  Database,
 } from 'lucide-vue-next'
 
 const accountsStore = useAccountsStore()
@@ -23,19 +25,29 @@ const activeAccountDisplay = computed(() => {
   return (acc.email || acc.name || acc.id) + sub
 })
 
-
 const activeAccountTierDisplay = computed(() => {
   const acc = accountsStore.activeAccount
   if (!acc) return undefined
-  return `订阅等级: ${acc.tier || 'Free'}`
+  return `订阅: ${acc.tier || 'Free'}`
 })
+
 const totalAccountsCount = computed(() => accountsStore.accountRows.length)
 
 const availableAccountsCount = computed(() => {
   const total = totalAccountsCount.value
   if (total === 0) return 0
-  const available = accountsStore.accountRows.filter((a) => a.is_available !== false).length
+  const available = accountsStore.accountRows.filter((a) => a.is_available !== false && a.enabled !== false).length
   return Math.min(available, total)
+})
+
+const reasoningTokensDisplay = computed(() => {
+  const tokens = systemStore.stats?.totals?.reasoning_tokens || 0
+  return tokens.toLocaleString()
+})
+
+const cachedTokensDisplay = computed(() => {
+  const tokens = systemStore.stats?.totals?.cached_tokens || 0
+  return tokens.toLocaleString()
 })
 
 async function loadData() {
@@ -45,14 +57,13 @@ async function loadData() {
   ])
 }
 
-// 页面可见时每 10 秒自动轮询一次统计与账号状态
 usePolling(loadData, 10000)
 </script>
 
 <template>
   <div class="space-y-6">
     <!-- Stat Cards Grid -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
       <StatCard
         label="当前激活账号"
         :value="activeAccountDisplay"
@@ -86,7 +97,7 @@ usePolling(loadData, 10000)
       </StatCard>
 
       <StatCard
-        label="429 配额耗尽次数"
+        label="429 配额耗尽"
         :value="systemStore.totalRateLimited"
         :color="systemStore.totalRateLimited > 0 ? 'amber' : 'default'"
       >
@@ -94,9 +105,29 @@ usePolling(loadData, 10000)
           <AlertTriangle class="w-4 h-4 text-amber-500" />
         </template>
       </StatCard>
+
+      <StatCard
+        label="思考 Tokens"
+        :value="reasoningTokensDisplay"
+        color="default"
+      >
+        <template #icon>
+          <Brain class="w-4 h-4 text-purple-600" />
+        </template>
+      </StatCard>
+
+      <StatCard
+        label="缓存 Tokens"
+        :value="cachedTokensDisplay"
+        color="default"
+      >
+        <template #icon>
+          <Database class="w-4 h-4 text-teal-600" />
+        </template>
+      </StatCard>
     </div>
 
-    <!-- Model Statistics Table -->
+    <!-- Model Statistics Table with Account Breakdown Accordion -->
     <ModelStatsTable
       :stats="systemStore.stats?.models || {}"
     />

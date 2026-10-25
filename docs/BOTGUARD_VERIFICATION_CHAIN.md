@@ -272,8 +272,8 @@ _.l(requestProto, 5, t);             // 3. 将 Token 注入 Protobuf 字段 5 (W
 | **`6`** | `Field 7` | `tools` | 工具声明列表（Google 搜索、代码执行、Google Maps 等） |
 | **`7`** | `Field 8` | `evergreen_model_uri` | 动态常青模型 URI（如 `"models/gemini-..."`） |
 | **`10`** | `Field 11` | `request_flag` | 请求行为标记（固定值 `1`） |
-| **`11`** | `Field 12` | `cached_content` | 上下文缓存资源名称 |
-| **`13`** | `Field 14` | `location` | 用户位置与时区声明（如 `[[null, null, "Asia/Tokyo"]]`） |
+| **`11`** | `Field 12` | `session_token` | 会话续接令牌（如 `"v1_..."`） |
+| **`13`** | `Field 14` | `request_context` | 请求上下文与时区声明（如 `[[null, null, "Asia/Tokyo"]]`） |
 ### 浏览器内 Fetch/XHR 发送
 
 ```http

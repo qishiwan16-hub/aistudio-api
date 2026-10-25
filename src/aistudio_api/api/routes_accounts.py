@@ -39,6 +39,9 @@ class AccountResponse(BaseModel):
     auth_user: str = "0"
     cookie_id: str | None = None
     tier: str = "Free"
+    enabled: bool = True
+    group: str = "default"
+    notes: str = ""
 
 
 def to_account_response(account: AccountMeta) -> AccountResponse:
@@ -56,12 +59,63 @@ def to_account_response(account: AccountMeta) -> AccountResponse:
         auth_user=getattr(account, "auth_user", "0") or "0",
         cookie_id=cid,
         tier=getattr(account, "tier", "Free") or "Free",
+        enabled=getattr(account, "enabled", True),
+        group=getattr(account, "group", "default") or "default",
+        notes=getattr(account, "notes", "") or "",
     )
 
 
 class UpdateAccountRequest(BaseModel):
     name: str
 
+
+class UpdateGroupRequest(BaseModel):
+    group: str
+
+
+class UpdateNotesRequest(BaseModel):
+    notes: str
+
+
+class ToggleAccountRequest(BaseModel):
+    enabled: bool | None = None
+
+
+class PresetResponse(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    action: str = "snapshot"
+    account_ids: list[str] = []
+    target_tiers: list[str] = []
+    target_groups: list[str] = []
+    is_system: bool = False
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class CreatePresetRequest(BaseModel):
+    name: str
+    description: str = ""
+    action: str = "snapshot"
+    account_ids: list[str] = []
+    target_tiers: list[str] = []
+    target_groups: list[str] = []
+
+
+class SnapshotPresetRequest(BaseModel):
+    name: str
+    description: str = ""
+
+
+class ApplyPresetResponse(BaseModel):
+    ok: bool = True
+    preset_id: str
+    preset_name: str
+    enabled_count: int
+    disabled_count: int
+    enabled_account_ids: list[str]
+    disabled_account_ids: list[str]
 
 class ImportCookiesRequest(BaseModel):
     cookies: str
@@ -387,6 +441,180 @@ async def update_account(
         raise HTTPException(status_code=404, detail="账号不存在")
     log.info("账号已更新: %s -> %s", account.id, req.name)
     return to_account_response(account)
+
+
+@router.post("/{account_id}/toggle", response_model=AccountResponse)
+async def toggle_account(
+    account_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
+    req: ToggleAccountRequest = Body(default_factory=ToggleAccountRequest),
+    account_service: AccountService = Depends(get_account_service),
+) -> AccountResponse:
+    """切换单个账号的使能状态 (Enabled/Disabled)。"""
+    account = account_service.toggle_account_enabled(account_id, req.enabled)
+    if account is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    # 如果刚好关闭了当前活跃账号，顺延切到下一个可用账号
+    active_acc = account_service.get_active_account()
+    if active_acc and active_acc.id == account_id and not account.enabled:
+        from aistudio_api.application.account_orchestrator import try_switch_account
+
+        await try_switch_account(failed_account_id=account_id)
+
+    log.info(
+        "账号使能状态已切换: %s -> %s",
+        account.id,
+        "启用" if account.enabled else "停用",
+    )
+    return to_account_response(account)
+
+
+@router.put("/{account_id}/group", response_model=AccountResponse)
+async def update_account_group(
+    account_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
+    req: UpdateGroupRequest = Body(...),
+    account_service: AccountService = Depends(get_account_service),
+) -> AccountResponse:
+    """更新账号所属业务分组。"""
+    account = account_service.update_account_group(account_id, req.group)
+    if account is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    log.info("账号分组已更新: %s -> %s", account.id, account.group)
+    return to_account_response(account)
+
+
+@router.put("/{account_id}/notes", response_model=AccountResponse)
+async def update_account_notes(
+    account_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
+    req: UpdateNotesRequest = Body(...),
+    account_service: AccountService = Depends(get_account_service),
+) -> AccountResponse:
+    """更新账号备注。"""
+    account = account_service.update_account_notes(account_id, req.notes)
+    if account is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    return to_account_response(account)
+
+
+@router.get("/groups/list", response_model=list[str])
+async def list_groups(
+    account_service: AccountService = Depends(get_account_service),
+) -> list[str]:
+    """列出当前存在的所有分组名称。"""
+    return account_service.list_groups()
+
+
+@router.post("/groups/{group_name}/toggle")
+async def batch_toggle_group(
+    group_name: str,
+    enabled: bool = Body(..., embed=True),
+    account_service: AccountService = Depends(get_account_service),
+) -> dict[str, object]:
+    """按分组批量启用或停用账号。"""
+    updated = account_service.batch_toggle_group(group_name, enabled)
+    active_acc = account_service.get_active_account()
+    if active_acc and active_acc.group == group_name and not enabled:
+        from aistudio_api.application.account_orchestrator import try_switch_account
+
+        await try_switch_account(failed_account_id=active_acc.id)
+    return {"ok": True, "count": len(updated), "group": group_name, "enabled": enabled}
+
+
+# ─── 预设方案 (Presets) REST 路由 ───
+@router.get("/presets/list", response_model=list[PresetResponse])
+async def list_presets(
+    account_service: AccountService = Depends(get_account_service),
+) -> list[PresetResponse]:
+    """获取所有可用预设方案列表。"""
+    presets = account_service.list_presets()
+    return [PresetResponse.model_validate(p.to_dict()) for p in presets]
+
+
+@router.post("/presets", response_model=PresetResponse)
+async def create_preset(
+    req: CreatePresetRequest,
+    account_service: AccountService = Depends(get_account_service),
+) -> PresetResponse:
+    """创建自定义预设方案。"""
+    import secrets
+
+    from aistudio_api.infrastructure.account.account_store import AccountPreset
+
+    pid = f"preset_{secrets.token_hex(4)}"
+    preset = AccountPreset(
+        id=pid,
+        name=req.name.strip() or "自定义方案",
+        description=req.description.strip(),
+        action=req.action,
+        account_ids=req.account_ids,
+        target_tiers=req.target_tiers,
+        target_groups=req.target_groups,
+        is_system=False,
+    )
+    saved = account_service.save_preset(preset)
+    return PresetResponse.model_validate(saved.to_dict())
+
+
+@router.post("/presets/snapshot", response_model=PresetResponse)
+async def create_snapshot_preset(
+    req: SnapshotPresetRequest,
+    account_service: AccountService = Depends(get_account_service),
+) -> PresetResponse:
+    """将当前所有启用账号一键快照保存为新预设方案。"""
+    saved = account_service.create_snapshot_preset(req.name, req.description)
+    log.info("已创建账号快照方案: %s (id=%s)", saved.name, saved.id)
+    return PresetResponse.model_validate(saved.to_dict())
+
+
+@router.delete("/presets/{preset_id}")
+async def delete_preset(
+    preset_id: str,
+    account_service: AccountService = Depends(get_account_service),
+) -> dict[str, bool]:
+    """删除自定义预设方案。"""
+    try:
+        ok = account_service.delete_preset(preset_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="预设方案不存在")
+        return {"ok": True}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/presets/{preset_id}/apply", response_model=ApplyPresetResponse)
+async def apply_preset(
+    preset_id: str,
+    account_service: AccountService = Depends(get_account_service),
+) -> ApplyPresetResponse:
+    """一键应用预设方案，原子切换账号使能状态。"""
+    try:
+        preset, en_ids, dis_ids = account_service.apply_preset(preset_id)
+        # 检查当前活跃账号是否有效，若失效则顺延切换
+        active_acc = account_service.get_active_account()
+        from aistudio_api.application.account_orchestrator import try_switch_account
+
+        if not active_acc or not active_acc.enabled or active_acc.id in dis_ids:
+            await try_switch_account(failed_account_id=active_acc.id if active_acc else None)
+        else:
+            await try_switch_account()
+
+        log.info(
+            "已应用预设方案 '%s': 启用 %d 个, 停用 %d 个",
+            preset.name,
+            len(en_ids),
+            len(dis_ids),
+        )
+        return ApplyPresetResponse(
+            ok=True,
+            preset_id=preset.id,
+            preset_name=preset.name,
+            enabled_count=len(en_ids),
+            disabled_count=len(dis_ids),
+            enabled_account_ids=en_ids,
+            disabled_account_ids=dis_ids,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 @router.post("/import-cookies", response_model=ImportCookiesResponse)

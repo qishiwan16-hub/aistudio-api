@@ -160,11 +160,20 @@ def test_domain_overrides_scopes_osid_strictly_to_aistudio():
 
 
 @pytest.mark.asyncio
-async def test_import_bundle_flow(tmp_path):
+async def test_import_bundle_flow(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from aistudio_api.api import routes_accounts
     from aistudio_api.api.routes_accounts import ImportBundleRequest, import_bundle
     from aistudio_api.application.account_service import AccountService
     from aistudio_api.infrastructure.account.account_store import AccountStore
 
+    monkeypatch.setattr(
+        routes_accounts, "probe_account_benefit_tier", AsyncMock(return_value="Free")
+    )
+    monkeypatch.setattr(
+        routes_accounts, "probe_account_email", AsyncMock(return_value="mock@example.com")
+    )
     store = AccountStore(accounts_dir=tmp_path / "accounts")
     svc = AccountService(store)
 

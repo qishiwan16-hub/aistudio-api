@@ -12,7 +12,11 @@ from aistudio_api.config import (
     DEFAULT_TEXT_MODEL,
     settings,
 )
-from aistudio_api.domain.errors import RequestError, classify_error
+from aistudio_api.domain.errors import (
+    BrowserTransportError,
+    RequestError,
+    classify_error,
+)
 from aistudio_api.domain.models import ModelOutput
 from aistudio_api.infrastructure.gateway.capture import (
     CapturedRequest,
@@ -59,16 +63,17 @@ class AIStudioClient:
 
     def __init__(self, port: int = DEFAULT_BROWSER_PORT):
         self.port = port
-        self._captured: CapturedRequest | None = None
         self._session = BrowserSession(port=port)
         self._capture_service = RequestCaptureService(self._session)
         self._replay_service = RequestReplayService(session=self._session)
 
         self._streaming_gateway = StreamingGateway(session=self._session)
+
     @property
     def session(self) -> BrowserSession:
         """Expose active browser session facade."""
         return self._session
+
     async def warmup(self) -> None:
         """预热浏览器后端并加载 AI Studio 页面及捕获 BotGuard 服务。"""
         if self._session is not None:
@@ -260,6 +265,8 @@ class AIStudioClient:
             )
             if status != 200:
                 raise classify_error(status, raw_text)
+            if not raw_text.strip():
+                raise BrowserTransportError("empty 200 body (connection truncated)")
             output = parse_text_output(raw_text)
             output.model = model
             return output
@@ -338,6 +345,8 @@ class AIStudioClient:
             )
             if status != 200:
                 raise classify_error(status, raw_text)
+            if not raw_text.strip():
+                raise BrowserTransportError("empty 200 body (connection truncated)")
             output = parse_image_output(raw_text)
             output.model = model
 

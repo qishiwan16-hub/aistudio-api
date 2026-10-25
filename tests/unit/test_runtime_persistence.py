@@ -75,10 +75,10 @@ def test_account_rotator_state_persistence(tmp_path, monkeypatch):
     assert rotator_file.is_file()
     saved = json.loads(rotator_file.read_text(encoding="utf-8"))
     assert "acc_test1" in saved
-    assert saved["acc_test1"]["requests"] == 4
-    assert saved["acc_test1"]["rate_limited"] == 3
-    assert "gemini-3.7-flash" in saved["acc_test1"]["model_rate_limited_dates"]
-    assert saved["acc_test2"]["auth_errors"] == 1
+    assert saved["acc_test1"]["total_requests"] == 4
+    assert saved["acc_test1"]["total_rate_limited"] == 3
+    assert "gemini-3.7-flash" in saved["acc_test1"]["daily_models"]
+    assert saved["acc_test1"]["daily_models"]["gemini-3.7-flash"]["requests"] == 4
     assert saved["acc_test2"]["auth_cooldown"] > 0
 
     # Simulate restart by creating a new AccountRotator instance

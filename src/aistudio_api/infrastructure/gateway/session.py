@@ -374,7 +374,7 @@ class BrowserSession:
                     drain_task.add_done_callback(self._background_tasks.discard)
                 self._gate.set_ready(new_context)
                 log.info(
-                    "会话蓝绿平滑热切成功: auth_file=%s, u/%s (活跃在途=%d)",
+                    "会话切换完成: auth_file=%s, u/%s (活跃在途=%d)",
                     auth_file,
                     target_auth_user,
                     self._in_flight,
@@ -460,13 +460,8 @@ class BrowserSession:
                     hash_parts.append(str(part.inline_data[1]))
                 elif part.file_id is not None:
                     hash_parts.append(str(part.file_id))
-                elif part.executable_code is not None:
-                    hash_parts.append(str(part.executable_code[1]))
-                elif part.code_execution_result is not None:
-                    hash_parts.append(str(part.code_execution_result[1]))
                 else:
                     hash_parts.append("")
-
         content_hash = sha256(" ".join(hash_parts).encode("utf-8")).hexdigest()
 
         async with self._snapshot_lock:

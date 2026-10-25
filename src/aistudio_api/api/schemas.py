@@ -161,6 +161,7 @@ class GeminiGenerationConfig(BaseModel):
         validation_alias=AliasChoices("responseLogprobs", "response_logprobs"),
     )
     logprobs: int | None = None
+    seed: int | None = None
     mediaResolution: list[object] | int | str | None = Field(
         default=None,
         validation_alias=AliasChoices("mediaResolution", "media_resolution"),

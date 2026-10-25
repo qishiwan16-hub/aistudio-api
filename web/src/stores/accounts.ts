@@ -9,6 +9,7 @@ import type {
   ImportCookiesRequest,
   ProbeAndImportRequest,
   ImportBundleRequest,
+  AccountPreset,
 } from '@/types'
 import { useToastStore } from './toast.ts'
 
@@ -22,7 +23,9 @@ export const useAccountsStore = defineStore('accounts', () => {
   const loading = ref(false)
   const activatingId = ref<string | null>(null)
   const importing = ref(false)
-
+  const presets = ref<AccountPreset[]>([])
+  const groups = ref<string[]>([])
+  const applyingPresetId = ref<string | null>(null)
   const activeId = computed(() => activeAccount.value?.id || '')
 
   const accountRows = computed<AccountWithStats[]>(() => {
@@ -61,6 +64,96 @@ export const useAccountsStore = defineStore('accounts', () => {
       }
     } finally {
       loading.value = false
+    }
+  }
+
+  async function fetchPresets() {
+    try {
+      presets.value = await accountsApi.listPresets()
+    } catch {
+      // ignore
+    }
+  }
+
+  async function fetchGroups() {
+    try {
+      groups.value = await accountsApi.listGroups()
+    } catch {
+      // ignore
+    }
+  }
+
+  async function toggleAccountEnabled(id: string, enabled?: boolean) {
+    const toast = useToastStore()
+    try {
+      const updated = await accountsApi.toggle(id, enabled)
+      toast.success(`账号已${updated.enabled ? '启用' : '停用'}`)
+      await fetchAll()
+      return updated
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '切换状态失败'
+      toast.error(msg)
+      return null
+    }
+  }
+
+  async function updateAccountGroup(id: string, group: string) {
+    const toast = useToastStore()
+    try {
+      const updated = await accountsApi.updateGroup(id, group)
+      toast.success('分组已更新')
+      await fetchAll()
+      await fetchGroups()
+      return updated
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '更新分组失败'
+      toast.error(msg)
+      return null
+    }
+  }
+
+  async function applyPreset(presetId: string) {
+    const toast = useToastStore()
+    applyingPresetId.value = presetId
+    try {
+      const res = await accountsApi.applyPreset(presetId)
+      toast.success(`已应用「${res.preset_name}」: 启用 ${res.enabled_count} 个`)
+      await fetchAll()
+      return true
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '应用方案失败'
+      toast.error(msg)
+      return false
+    } finally {
+      applyingPresetId.value = null
+    }
+  }
+
+  async function createSnapshotPreset(name: string, description = '') {
+    const toast = useToastStore()
+    try {
+      const created = await accountsApi.createSnapshotPreset({ name, description })
+      toast.success(`方案「${created.name}」已保存`)
+      await fetchPresets()
+      return created
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '保存方案失败'
+      toast.error(msg)
+      return null
+    }
+  }
+
+  async function deletePreset(presetId: string) {
+    const toast = useToastStore()
+    try {
+      await accountsApi.deletePreset(presetId)
+      toast.success('方案已删除')
+      await fetchPresets()
+      return true
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '删除方案失败'
+      toast.error(msg)
+      return false
     }
   }
 
@@ -220,5 +313,15 @@ export const useAccountsStore = defineStore('accounts', () => {
     importBundle,
     detectAccountEmail,
     detectAccountTier,
+    presets,
+    groups,
+    applyingPresetId,
+    fetchPresets,
+    fetchGroups,
+    toggleAccountEnabled,
+    updateAccountGroup,
+    applyPreset,
+    createSnapshotPreset,
+    deletePreset,
   }
 })

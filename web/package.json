@@ -19,7 +19,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@rollup/rollup-android-arm64": "^4.63.4",
+    "@rollup/rollup-android-arm64": "^4.65.0",
     "@rollup/rollup-linux-arm64-gnu": "^4.63.4",
     "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^22.13.5",

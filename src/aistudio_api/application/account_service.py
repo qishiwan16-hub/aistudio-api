@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from aistudio_api.infrastructure.account.account_store import (
         AccountMeta,
+        AccountPreset,
         AccountStore,
     )
     from aistudio_api.infrastructure.gateway.session import BrowserSession
@@ -89,6 +90,9 @@ class AccountService:
         auth_user: str = "0",
         cookie_id: str | None = None,
         tier: str = "Free",
+        enabled: bool = True,
+        group: str = "default",
+        notes: str = "",
     ) -> AccountMeta:
         """从 Cookie 存储状态保存新账号。"""
         return self._store.save_account(
@@ -99,6 +103,9 @@ class AccountService:
             auth_user=auth_user,
             cookie_id=cookie_id,
             tier=tier,
+            enabled=enabled,
+            group=group,
+            notes=notes,
         )
 
     def batch_import_accounts(
@@ -136,3 +143,51 @@ class AccountService:
     def get_account_auth_path(self, account_id: str) -> Path | None:
         """获取指定账号的 auth.json 路径。"""
         return self._store.get_auth_path(account_id)
+
+    def toggle_account_enabled(
+        self, account_id: str, enabled: bool | None = None
+    ) -> AccountMeta | None:
+        """切换账号的启用/禁用状态。"""
+        return self._store.toggle_account_enabled(account_id, enabled)
+
+    def update_account_group(self, account_id: str, group: str) -> AccountMeta | None:
+        """更新账号所属分组。"""
+        return self._store.update_account_group(account_id, group)
+
+    def update_account_notes(self, account_id: str, notes: str) -> AccountMeta | None:
+        """更新账号运维备注。"""
+        return self._store.update_account_notes(account_id, notes)
+
+    def list_groups(self) -> list[str]:
+        """列出当前存在的所有分组。"""
+        return self._store.list_groups()
+
+    def batch_toggle_group(self, group: str, enabled: bool) -> list[AccountMeta]:
+        """按分组批量切换使能状态。"""
+        return self._store.batch_toggle_group(group, enabled)
+
+    def list_presets(self) -> list[AccountPreset]:
+        """列出所有预设方案。"""
+        return self._store.list_presets()
+
+    def get_preset(self, preset_id: str) -> AccountPreset | None:
+        """获取单个预设方案。"""
+        return self._store.get_preset(preset_id)
+
+    def save_preset(self, preset: AccountPreset) -> AccountPreset:
+        """保存或更新预设方案。"""
+        return self._store.save_preset(preset)
+
+    def delete_preset(self, preset_id: str) -> bool:
+        """删除自定义预设。"""
+        return self._store.delete_preset(preset_id)
+
+    def create_snapshot_preset(self, name: str, description: str = "") -> AccountPreset:
+        """快照保存当前所有已启用账号。"""
+        return self._store.create_snapshot_preset(name, description)
+
+    def apply_preset(
+        self, preset_id: str
+    ) -> tuple[AccountPreset, list[str], list[str]]:
+        """一键应用预设方案。"""
+        return self._store.apply_preset(preset_id)

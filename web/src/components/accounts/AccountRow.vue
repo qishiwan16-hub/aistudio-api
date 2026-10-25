@@ -14,6 +14,8 @@ import {
   AlertCircle,
   RefreshCw,
   Mail,
+  Tag,
+  Check,
 } from 'lucide-vue-next'
 import { useAccountsStore } from '@/stores/accounts.ts'
 
@@ -52,10 +54,40 @@ const todayRequests = computed(() => {
 const accountsStore = useAccountsStore()
 const detectingEmail = ref(false)
 const detectingTier = ref(false)
+const togglingEnabled = ref(false)
+const editingGroup = ref(false)
+const groupInput = ref('')
 
 const accountTier = computed(() => {
   return props.account.tier || 'Free'
 })
+
+const isEnabled = computed(() => {
+  return props.account.enabled !== false
+})
+
+async function handleToggleEnabled() {
+  togglingEnabled.value = true
+  try {
+    await accountsStore.toggleAccountEnabled(props.account.id)
+  } finally {
+    togglingEnabled.value = false
+  }
+}
+
+function startEditGroup() {
+  groupInput.value = props.account.group || 'default'
+  editingGroup.value = true
+}
+
+async function saveGroup() {
+  if (!editingGroup.value) return
+  const target = groupInput.value.trim() || 'default'
+  editingGroup.value = false
+  if (target !== (props.account.group || 'default')) {
+    await accountsStore.updateAccountGroup(props.account.id, target)
+  }
+}
 
 async function handleDetectEmail() {
   detectingEmail.value = true
@@ -80,25 +112,46 @@ async function handleDetectTier() {
   <div
     class="relative bg-white border rounded-xl p-3 shadow-2xs transition-all hover:shadow-xs"
     :class="[
-      account.session_expired
-        ? 'border-rose-300 bg-rose-50/20'
-        : active
-          ? 'border-brand-300 bg-brand-50/20 ring-1 ring-brand-400/20'
-          : 'border-gray-200/80 hover:border-gray-300',
+      !isEnabled
+        ? 'border-gray-200 bg-gray-50/60 opacity-60'
+        : account.session_expired
+          ? 'border-rose-300 bg-rose-50/20'
+          : active
+            ? 'border-brand-300 bg-brand-50/20 ring-1 ring-brand-400/20'
+            : 'border-gray-200/80 hover:border-gray-300',
     ]"
   >
     <!-- Sub-Account Header Bar -->
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
       <div class="flex items-center gap-2.5 min-w-0">
+        <!-- Enable/Disable Switch -->
+        <button
+          type="button"
+          role="switch"
+          :aria-checked="isEnabled"
+          :disabled="togglingEnabled"
+          class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+          :class="[isEnabled ? 'bg-emerald-500' : 'bg-gray-300', { 'opacity-50 cursor-wait': togglingEnabled }]"
+          title="启用或禁用此账号参与调度"
+          @click="handleToggleEnabled"
+        >
+          <span
+            class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out"
+            :class="isEnabled ? 'translate-x-4' : 'translate-x-0'"
+          />
+        </button>
+
         <!-- User Index Badge: u/0, u/1... -->
         <span
           class="px-2 py-0.5 rounded-full text-xs font-mono font-bold shrink-0"
           :class="[
-            account.session_expired
-              ? 'bg-rose-100 text-rose-800 border border-rose-200'
-              : active
-                ? 'bg-brand-500 text-white'
-                : 'bg-blue-50 text-blue-700 border border-blue-200/60',
+            !isEnabled
+              ? 'bg-gray-200 text-gray-500'
+              : account.session_expired
+                ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                : active
+                  ? 'bg-brand-500 text-white'
+                  : 'bg-blue-50 text-blue-700 border border-blue-200/60',
           ]"
         >
           u/{{ account.auth_user }}
@@ -119,11 +172,45 @@ async function handleDetectTier() {
             { 'opacity-50 cursor-wait': detectingTier },
           ]"
           :disabled="detectingTier"
-          title="点击重新探测此子账号的 Google AI 订阅权益等级 (Free / Plus / Pro / Ultra)"
+          title="点击重新探测此子账号的订阅类型 (Free / Plus / Pro / Ultra)"
           @click="handleDetectTier"
         >
           {{ detectingTier ? '...' : accountTier }}
         </button>
+
+        <!-- Group Tag / Inline Editor -->
+        <div class="flex items-center">
+          <div
+            v-if="editingGroup"
+            class="flex items-center gap-1"
+          >
+            <input
+              v-model="groupInput"
+              type="text"
+              class="px-1.5 py-0.5 text-[11px] font-mono border rounded focus:outline-none focus:ring-1 focus:ring-brand-500 w-20"
+              placeholder="group"
+              @keydown.enter="saveGroup"
+              @blur="saveGroup"
+            >
+            <button
+              type="button"
+              class="text-emerald-600 hover:text-emerald-700"
+              @click="saveGroup"
+            >
+              <Check class="w-3 h-3" />
+            </button>
+          </div>
+          <button
+            v-else
+            type="button"
+            class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono font-medium text-gray-500 bg-gray-100 hover:bg-gray-200/80 transition-colors cursor-pointer border border-gray-200"
+            title="点击修改所属分组"
+            @click="startEditGroup"
+          >
+            <Tag class="w-2.5 h-2.5 text-gray-400" />
+            <span>{{ account.group || 'default' }}</span>
+          </button>
+        </div>
 
         <!-- Account Name & Memo -->
         <div class="truncate">
@@ -175,7 +262,13 @@ async function handleDetectTier() {
 
         <!-- Status Pill -->
         <div
-          v-if="account.session_expired"
+          v-if="!isEnabled"
+          class="inline-flex items-center gap-1 text-[11px] font-semibold text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full border border-gray-200"
+        >
+          <span>已停用</span>
+        </div>
+        <div
+          v-else-if="account.session_expired"
           class="inline-flex items-center gap-1.5 text-[11px] font-semibold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200"
           title="该账号登录态已失效，已被系统禁用。更新 Cookie 凭据后可点击恢复。"
         >
@@ -212,7 +305,7 @@ async function handleDetectTier() {
 
         <!-- Action Buttons -->
         <div class="flex items-center gap-1.5 ml-1">
-          <!-- 登录态失效状态下的快捷恢复按钮 -->
+          <!-- 恢复按钮 -->
           <button
             v-if="account.session_expired"
             type="button"
@@ -225,7 +318,7 @@ async function handleDetectTier() {
           </button>
 
           <Button
-            v-if="!active && !account.session_expired"
+            v-if="!active && !account.session_expired && isEnabled"
             variant="secondary"
             size="sm"
             :loading="activating"
@@ -238,7 +331,7 @@ async function handleDetectTier() {
             type="button"
             class="p-1 text-gray-400 hover:text-brand-600 hover:bg-gray-100 rounded-lg transition-colors cursor-pointer"
             :class="{ 'opacity-50 cursor-not-allowed': detectingEmail }"
-            title="自动识别并记录此子账号真实邮箱与订阅等级"
+            title="自动识别并记录此子账号真实邮箱与订阅类型"
             :disabled="detectingEmail"
             @click="handleDetectEmail"
           >

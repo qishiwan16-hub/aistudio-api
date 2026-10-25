@@ -1,0 +1,205 @@
+# API 客户端调用鉴权密钥列表 (用于外部客户端调用 /v1beta/... 接口鉴权)
+api_keys: []
+
+# 服务端日志与请求转储调试配置
+logging:
+  level: INFO
+  dump_requests: false
+  dump_to_file: false
+  dump_dir: dumps
+
+rotator:
+  max_retries: 5
+  strategy: sticky
+  stickiness_bonus: 400.0
+  stickiness_threshold: 0.8
+  drip_penalty: 500.0
+  tier_weights:
+    Free: 0.0
+    Plus: 0.5
+    Pro: 1.0
+    Ultra: 2.0
+    Ultra_20X: 3.0
+  cooldowns:
+    rate_limited_short: 60
+    rate_limited_drip: 300
+    rate_limited_drip_extended: 600
+    auth_error: 300
+
+paid_model_rules:
+  ultra_required:
+    contains: ["veo", "ultra"]
+    required_tiers: ["Ultra", "Ultra_20X"]
+  pro_required:
+    contains: ["argon", "gemini-4", "image", "imagen"]
+    required_tiers: ["Pro", "Ultra", "Ultra_20X"]
+
+model_defaults:
+  drop_unsupported_params: false
+  profiles:
+    - name: image_models
+      match:
+        contains:
+          - image
+          - imagen
+      is_image_model: true
+      default_tools:
+        - google_search_and_image_search
+      generation_config_defaults:
+        response_mime_type: null
+        image_output_mode: image_only
+        thinking_config:
+          level: MINIMAL
+          mode: 1
+      clear_generation_config_indexes:
+        - 7
+        - 13
+        - 17
+      disable_safety_settings: true
+    - name: video_models
+      match:
+        prefixes:
+          - veo-
+        contains:
+          - veo
+      disable_safety_settings: true
+    - name: gemma_models
+      match:
+        prefixes:
+          - gemma-
+      default_tools:
+        - google_search
+      safety_settings:
+        Harassment: 5
+        Hate: 5
+        Sexually Explicit: 5
+        Dangerous Content: 5
+    - name: gemini_models
+      match:
+        prefixes:
+          - gemini-
+      default_tools:
+        - google_search
+      safety_settings:
+        Harassment: 5
+        Hate: 5
+        Sexually Explicit: 5
+        Dangerous Content: 5
+      drop_unsupported_params: true
+  models: {}
+
+tier_quotas:
+  Free:
+    flash_models:
+      match:
+        contains: ["flash"]
+      daily_limit: 100
+    pro_models:
+      match:
+        contains: ["pro"]
+      daily_limit: 10
+    default_limit: 20
+  Plus:
+    flash_models:
+      match:
+        contains: ["flash"]
+      daily_limit: 300
+    pro_models:
+      match:
+        contains: ["pro"]
+      daily_limit: 30
+    default_limit: 50
+  Pro:
+    argon_models:
+      match:
+        contains: ["argon", "gemini-4"]
+      daily_limit: 50
+    flash_models:
+      match:
+        contains: ["flash"]
+      daily_limit: 150
+    pro_models:
+      match:
+        contains: ["pro"]
+      daily_limit: 50
+    image_models:
+      match:
+        contains: ["image", "imagen"]
+      daily_limit: 50
+    default_limit: 50
+  Ultra:
+    argon_models:
+      match:
+        contains: ["argon", "gemini-4"]
+      daily_limit: 250
+    flash_models:
+      match:
+        contains: ["flash"]
+      daily_limit: 1500
+    pro_models:
+      match:
+        contains: ["pro"]
+      daily_limit: 250
+    image_models:
+      match:
+        contains: ["image", "imagen"]
+      daily_limit: 250
+    video_models:
+      match:
+        contains: ["veo"]
+      daily_limit: 50
+    default_limit: 250
+  Ultra_20X:
+    argon_models:
+      match:
+        contains: ["argon", "gemini-4"]
+      daily_limit: 1000
+    flash_models:
+      match:
+        contains: ["flash"]
+      daily_limit: 5000
+    pro_models:
+      match:
+        contains: ["pro"]
+      daily_limit: 1000
+    image_models:
+      match:
+        contains: ["image", "imagen"]
+      daily_limit: 1000
+    video_models:
+      match:
+        contains: ["veo"]
+      daily_limit: 200
+    default_limit: 1000
+  overrides: {}
+
+account_presets:
+  - id: preset_all
+    name: 全部启用 (最大并发)
+    description: 激活所有可用账号，提供最充沛的并发与负载池
+    action: enable_all
+    is_system: true
+  - id: preset_paid_only
+    name: 纯高阶付费池 (Plus/Pro/Ultra)
+    description: 仅激活具有付费权益的账号，全力保障高阶模型调用
+    action: filter_tier
+    target_tiers: ["Plus", "Pro", "Ultra", "Ultra_20X"]
+    is_system: true
+  - id: preset_ultra_only
+    name: 旗舰专属池 (Ultra 独占)
+    description: 仅激活 Ultra 顶级算力账号，保障最顶尖模型调用
+    action: filter_tier
+    target_tiers: ["Ultra", "Ultra_20X"]
+    is_system: true
+  - id: preset_free_only
+    name: 纯免费节能池 (Free)
+    description: 仅激活 Free 等级账号，用于日常普通模型测试
+    action: filter_tier
+    target_tiers: ["Free"]
+    is_system: true
+  - id: preset_production
+    name: 生产专属集群 (Production)
+    description: 仅激活 group 标记为 production 的核心业务账号
+    action: filter_group
+    target_groups: ["production"]
+    is_system: true

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from aistudio_api.domain.errors import BrowserTransportError
 from aistudio_api.infrastructure.account.cookie_parser import (
     calculate_sapisid_hash,
     get_tier_header_value,
@@ -29,9 +32,95 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 logger = get_logger("transport")
 
 
-def _get_active_auth_cookies() -> dict[str, str] | None:
-    """从当前活跃账号的 auth.json 读取凭据 Cookie 作为本地高速兜底。"""
+def _ensure_net_trace(page: CDPPage) -> None:
+    """Subscribe to $rpc/ CDP network events to attribute fetch failures."""
+    if getattr(page, "has_net_trace", False):
+        return
+    page.has_net_trace = True
+
+    def on_request(data: dict[str, object]) -> None:
+        url = str(data.get("url") or "")
+        rid = str(data.get("request_id") or "")
+        if "$rpc/" not in url or not rid:
+            return
+        page.rpc_net_requests[rid] = {"url": url, "sent_at": time.time()}
+        while len(page.rpc_net_requests) > 32:
+            page.rpc_net_requests.pop(next(iter(page.rpc_net_requests)))
+
+    def on_response(data: dict[str, object]) -> None:
+        entry = page.rpc_net_requests.get(str(data.get("request_id") or ""))
+        if entry is None:
+            return
+        entry["resp_status"] = int(str(data.get("status") or 0))
+        entry["resp_at"] = time.time()
+
+    def on_loading_failed(params: dict[str, object]) -> None:
+        entry = page.rpc_net_requests.get(str(params.get("requestId") or ""))
+        if entry is None:
+            return
+        entry.update(
+            {
+                "error_text": str(params.get("errorText") or ""),
+                "canceled": bool(params.get("canceled")),
+                "blocked_reason": params.get("blockedReason"),
+                "failed_at": time.time(),
+            }
+        )
+        page.rpc_net_failures.append(dict(entry))
+        del page.rpc_net_failures[:-8]
+
+    with suppress(Exception):
+        page.on_request(on_request)
+        page.on_response(on_response)
+        page.on_loading_failed(on_loading_failed)
+
+
+def _log_rpc_net_evidence(page: CDPPage, where: str) -> None:
+    """Log recent $rpc/ Network.loadingFailed evidence when in-page fetch fails."""
+    failures = getattr(page, "rpc_net_failures", None) or []
+    if not failures:
+        logger.warning(
+            "页面 fetch 传输失败 (%s)：无 Network.loadingFailed 记录（页面 JS 层中止或监听晚于请求）",
+            where,
+        )
+        return
+    now = time.time()
+    parts = []
+    for f in failures[-3:]:
+        tail = str(f.get("url") or "").rsplit("/", 1)[-1][:80]
+        failed_at = f.get("failed_at")
+        age = now - failed_at if isinstance(failed_at, (int, float)) else -1.0
+        parts.append(
+            f"{tail} err={f.get('error_text') or '-'} canceled={bool(f.get('canceled'))} "
+            f"blocked={f.get('blocked_reason') or '-'} resp={f.get('resp_status') or 'none'} "
+            f"age={age:.1f}s"
+        )
+    logger.warning(
+        "页面 fetch 传输失败 (%s)：CDP 网络层证据 %s",
+        where,
+        " | ".join(parts),
+    )
+
+
+def _transport_error(page: CDPPage, message: str) -> BrowserTransportError:
+    exc = BrowserTransportError(message)
+    exc.net_evidence = list(getattr(page, "rpc_net_failures", None) or [])[-8:]
+    return exc
+
+
+def _get_auth_cookies(auth_file: str | None = None) -> dict[str, str] | None:
+    """Read fallback credentials from the page's bound auth_file or active account."""
     try:
+        if auth_file:
+            bound_path = Path(auth_file)
+            if bound_path.is_file():
+                data = json.loads(bound_path.read_text(encoding="utf-8"))
+                cookies = data.get("cookies") or []
+                return {
+                    str(c.get("name") or ""): str(c.get("value") or "")
+                    for c in cookies
+                    if c.get("name")
+                }
         from aistudio_api.infrastructure.account.account_store import AccountStore
 
         store = AccountStore()
@@ -101,9 +190,9 @@ async def _ensure_authorization_header(
         with suppress(Exception):
             await page.get_cookies()
             cookie_dict = getattr(page, "_cached_cookies", None)
-    # 2. 如果 CDP 出现超时波动或未取到 SAPISID，回退读取活跃账号 auth.json 凭据
+    # 2. 如果 CDP 出现超时波动或未取到 SAPISID，优先从页面绑定的 auth.json 回退读取凭据
     if not cookie_dict or not any("SAPISID" in k for k in cookie_dict):
-        disk_cookies = _get_active_auth_cookies()
+        disk_cookies = _get_auth_cookies(getattr(page, "account_auth_file", None))
         if disk_cookies and any("SAPISID" in k for k in disk_cookies):
             cookie_dict = disk_cookies
             page._cached_cookies = cookie_dict
@@ -194,6 +283,7 @@ class XHRStreamTransport:
         clean_headers = await _ensure_authorization_header(
             page, headers, auth_user=auth_user, tier=tier
         )
+        _ensure_net_trace(page)
         args = build_hooked_request_args(
             url=url,
             headers=clean_headers,
@@ -206,7 +296,8 @@ class XHRStreamTransport:
         status = int(str(res_dict.get("status") or 0))
         raw_text = str(res_dict.get("body") or "")
         if status == 0:
-            raise RuntimeError(f"replay failed: {raw_text}")
+            _log_rpc_net_evidence(page, "replay")
+            raise _transport_error(page, f"replay failed: {raw_text}")
         return status, raw_text.encode("utf-8")
 
     async def send_streaming_request(
@@ -228,6 +319,7 @@ class XHRStreamTransport:
         clean_headers = await _ensure_authorization_header(
             page, headers, auth_user=auth_user, tier=tier
         )
+        _ensure_net_trace(page)
         rid = uuid.uuid4().hex[:8]
 
         # Ensure native binding on page and register local async queue
@@ -260,7 +352,7 @@ class XHRStreamTransport:
         try:
             while not is_terminal:
                 if page.is_closed() is True:
-                    raise RuntimeError("Browser page closed during streaming")
+                    raise BrowserTransportError("Browser page closed during streaming")
                 now = asyncio.get_running_loop().time()
                 remaining = deadline - now
                 if remaining <= 0:
@@ -271,7 +363,7 @@ class XHRStreamTransport:
                     event = await asyncio.wait_for(queue.get(), timeout=step_timeout)
                 except TimeoutError:
                     if page.is_closed() is True:
-                        raise RuntimeError(
+                        raise BrowserTransportError(
                             "Browser page closed during streaming"
                         ) from None
                     continue
@@ -288,7 +380,8 @@ class XHRStreamTransport:
                         deadline = asyncio.get_running_loop().time() + timeout_s
                 elif etype == "error":
                     message = str(event.get("message") or "unknown error")
-                    raise RuntimeError(f"streaming request failed: {message}")
+                    _log_rpc_net_evidence(page, "streaming")
+                    raise _transport_error(page, f"streaming request failed: {message}")
                 elif etype in ("done", "aborted"):
                     while not queue.empty():
                         try:
@@ -302,7 +395,10 @@ class XHRStreamTransport:
                     is_terminal = True
                     break
             if not status_sent:
-                raise RuntimeError("streaming request timeout: no response status")
+                _log_rpc_net_evidence(page, "streaming-no-status")
+                raise _transport_error(
+                    page, "streaming request timeout: no response status"
+                )
             if not is_terminal:
                 raise TimeoutError("streaming response timed out before completion")
         finally:

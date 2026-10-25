@@ -9,10 +9,53 @@ export interface Account {
   auth_user: string
   cookie_id?: string | null
   tier?: string
+  enabled: boolean
+  group: string
+  notes?: string
 }
 
-export interface AccountWithStats extends Omit<Account, 'last_used'>, Partial<AccountRotationStats> {
-  last_used?: string | null
+export type AccountWithStats = Omit<Account, 'last_used' | 'auth_user' | 'email'> &
+  Partial<AccountRotationStats> & {
+    auth_user: string
+    email: string | null
+    last_used?: string | null
+  }
+
+export interface AccountPreset {
+  id: string
+  name: string
+  description?: string
+  action: 'snapshot' | 'enable_all' | 'disable_all' | 'filter_tier' | 'filter_group' | string
+  account_ids: string[]
+  target_tiers: string[]
+  target_groups: string[]
+  is_system: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface CreatePresetRequest {
+  name: string
+  description?: string
+  action?: string
+  account_ids?: string[]
+  target_tiers?: string[]
+  target_groups?: string[]
+}
+
+export interface SnapshotPresetRequest {
+  name: string
+  description?: string
+}
+
+export interface ApplyPresetResponse {
+  ok: boolean
+  preset_id: string
+  preset_name: string
+  enabled_count: number
+  disabled_count: number
+  enabled_account_ids: string[]
+  disabled_account_ids: string[]
 }
 
 export interface ImportCookiesRequest {

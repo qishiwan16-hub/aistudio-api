@@ -318,21 +318,127 @@ class ModelDiscoveryService:
         return None
 
     def is_model_allowed_for_tier(self, model_id: str, tier: str | None) -> bool:
-        """根据缓存的 ListModels accessModes (Field 83) 判断指定订阅等级是否可访问该模型。"""
+        """根据 config.yaml 付费规则以及缓存的 ListModels accessModes 判断指定订阅等级是否可访问该模型。"""
+        req_tiers = self.get_required_tiers(model_id)
+        if req_tiers:
+            norm_tier = (tier or "Free").strip()
+            return norm_tier in req_tiers
+
         info = self.get_cached_model_info(model_id)
         if not info:
             return True
         raw_modes = info.get("accessModes")
         if not isinstance(raw_modes, list) or not raw_modes:
             return True
-        norm_tier = (tier or "Free").strip().capitalize()
+        norm_tier = (tier or "Free").strip().lower()
+        is_high_tier = norm_tier in ("plus", "pro", "ultra") or "ultra" in norm_tier or "pro" in norm_tier
+        is_ultra_tier = "ultra" in norm_tier
         for mode in raw_modes:
-            if mode == 3 and norm_tier in ("Pro", "Ultra"):
+            if mode == 3 and is_high_tier:
                 return True
-            if mode == 4 and norm_tier == "Ultra":
+            if mode == 4 and is_ultra_tier:
                 return True
         # 如果 accessModes 只包含 1 (Paid API key) 且不含 3/4，对所有网页端等级放行尝试
         return all(m not in (3, 4) for m in raw_modes)
+
+    def is_paid_model(self, model_id: str) -> bool:
+        """判定目标模型是否为付费模型（由 config.yaml 的 paid_model_rules 严格驱动，结合 upstream accessModes）。"""
+        from aistudio_api.infrastructure.gateway.model_defaults import (
+            get_configured_paid_model_rules,
+        )
+
+        clean_m = model_id.removeprefix("models/").lower()
+        rules = get_configured_paid_model_rules()
+        for rule_cfg in rules.values():
+            if not isinstance(rule_cfg, dict):
+                continue
+            contains = [
+                str(c).lower()
+                for c in (rule_cfg.get("contains") or [])
+                if isinstance(c, str)
+            ]
+            prefixes = [
+                str(p).lower()
+                for p in (rule_cfg.get("prefixes") or [])
+                if isinstance(p, str)
+            ]
+            exact = [
+                str(e).removeprefix("models/").lower()
+                for e in (rule_cfg.get("exact") or [])
+                if isinstance(e, str)
+            ]
+            if (
+                (exact and clean_m in exact)
+                or any(clean_m.startswith(p) for p in prefixes)
+                or any(c in clean_m for c in contains)
+            ):
+                return True
+
+        info = self.get_cached_model_info(clean_m)
+        if info:
+            if info.get("paid") is True:
+                return True
+            modes = info.get("accessModes")
+            if isinstance(modes, list) and modes and all(m in (3, 4) for m in modes):
+                return True
+            codes = info.get("capabilityCodes")
+            if isinstance(codes, list) and 20 in codes:
+                return True
+        return False
+
+    def get_required_tier(self, model_id: str) -> str:
+        """获取目标模型所需的最低账号层级（兼容现有单层级调用）。"""
+        tiers = self.get_required_tiers(model_id)
+        if not tiers:
+            return "Free"
+        return tiers[0]
+
+    def get_required_tiers(self, model_id: str) -> list[str]:
+        """获取目标模型所允许调用的账号层级列表（由 upstream accessModes 与 config.yaml 共同驱动）。"""
+        clean_m = model_id.removeprefix("models/").lower()
+        info = self.get_cached_model_info(clean_m)
+        if info:
+            modes = info.get("accessModes")
+            if isinstance(modes, list) and 4 in modes and 3 not in modes:
+                return ["Ultra", "Ultra_20X"]
+
+        from aistudio_api.infrastructure.gateway.model_defaults import (
+            get_configured_paid_model_rules,
+        )
+
+        rules = get_configured_paid_model_rules()
+        for rule_cfg in rules.values():
+            if not isinstance(rule_cfg, dict):
+                continue
+            contains = [
+                str(c).lower()
+                for c in (rule_cfg.get("contains") or [])
+                if isinstance(c, str)
+            ]
+            prefixes = [
+                str(p).lower()
+                for p in (rule_cfg.get("prefixes") or [])
+                if isinstance(p, str)
+            ]
+            exact = [
+                str(e).removeprefix("models/").lower()
+                for e in (rule_cfg.get("exact") or [])
+                if isinstance(e, str)
+            ]
+            if (
+                (exact and clean_m in exact)
+                or any(clean_m.startswith(p) for p in prefixes)
+                or any(c in clean_m for c in contains)
+            ):
+                req = rule_cfg.get("required_tiers")
+                if isinstance(req, list) and req:
+                    return [str(t) for t in req]
+
+        if info:
+            modes = info.get("accessModes")
+            if isinstance(modes, list) and 3 in modes:
+                return ["Pro", "Ultra", "Ultra_20X"]
+        return []
 
     async def _fetch_via_page(self, page: CDPPage) -> list[dict[str, object]]:
         """在 CDP Page 环境中直接执行 XHR 拉取 ListModels（自动带齐浏览器完整凭据）。"""

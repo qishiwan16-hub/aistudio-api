@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import gzip
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from aistudio_api.domain.errors import BrowserTransportError
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
     STREAM_CLEANUP_JS,
     STREAMING_INIT_JS,
+    build_hooked_request_args,
+    build_streaming_init_args,
 )
+from aistudio_api.infrastructure.gateway.capture import CapturedRequest
+from aistudio_api.infrastructure.gateway.session import BrowserSession
+from aistudio_api.infrastructure.gateway.streaming import StreamingGateway
 from aistudio_api.infrastructure.gateway.transport import XHRStreamTransport
 
 
@@ -188,3 +196,163 @@ async def test_transport_abort_stream_by_rid():
         await task2
 
     assert transport.in_flight_count == 0
+
+
+def test_build_request_args_gzip_above_threshold():
+    """Verify bodies >= 96KB are automatically gzipped and base64-encoded for fetch."""
+    small_body = '["models/gemini-3.7-flash","hello"]'
+    small_args = build_hooked_request_args(
+        url="https://example.com",
+        headers={"Content-Type": "application/json+protobuf"},
+        body=small_body,
+        timeout_s=60.0,
+    )
+    assert "gzip" not in small_args
+    assert small_args["body"] == small_body
+
+    large_body = '["models/gemini-3.7-flash","' + ("A" * (96 * 1024)) + '"]'
+    large_args = build_streaming_init_args(
+        url="https://example.com",
+        headers={"Content-Type": "application/json+protobuf"},
+        body=large_body,
+        timeout_s=60.0,
+        rid="r_gzip",
+    )
+    assert large_args.get("gzip") is True
+    assert large_args["rid"] == "r_gzip"
+    headers = large_args["headers"]
+    assert isinstance(headers, dict)
+    assert headers["Content-Encoding"] == "gzip"
+    compressed_bytes = base64.b64decode(str(large_args["body"]))
+    assert gzip.decompress(compressed_bytes).decode("utf-8") == large_body
+
+
+@pytest.mark.asyncio
+async def test_replay_failure_logs_and_attaches_cdp_net_evidence():
+    """Verify in-page fetch failure attaches CDP Network.loadingFailed evidence to BrowserTransportError."""
+    transport = XHRStreamTransport()
+    page = MagicMock(spec=CDPPage)
+    page.has_net_trace = False
+    page.rpc_net_requests = {}
+    page.rpc_net_failures = []
+    page._cached_cookies = {"SAPISID": "test_sapisid"}
+
+    req_cb = None
+    fail_cb = None
+
+    def capture_req(cb):
+        nonlocal req_cb
+        req_cb = cb
+        return lambda: None
+
+    def capture_fail(cb):
+        nonlocal fail_cb
+        fail_cb = cb
+        return lambda: None
+
+    page.on_request = MagicMock(side_effect=capture_req)
+    page.on_response = MagicMock(return_value=lambda: None)
+    page.on_loading_failed = MagicMock(side_effect=capture_fail)
+
+    async def fake_eval(_expr, _args=None, **_kwargs):
+        if req_cb and fail_cb:
+            req_cb(
+                {
+                    "request_id": "req_1",
+                    "url": "https://alkalimakersuite-pa.clients6.google.com/$rpc/MakerSuiteService/GenerateContent",
+                }
+            )
+            fail_cb(
+                {
+                    "requestId": "req_1",
+                    "errorText": "net::ERR_CONNECTION_RESET",
+                    "canceled": False,
+                }
+            )
+        return {"status": 0, "body": "network error"}
+
+    page.evaluate = AsyncMock(side_effect=fake_eval)
+
+    with pytest.raises(
+        BrowserTransportError, match="replay failed: network error"
+    ) as exc_info:
+        await transport.send_hooked_request(
+            page,
+            url="https://alkalimakersuite-pa.clients6.google.com/$rpc/MakerSuiteService/GenerateContent",
+            headers={},
+            body="[]",
+            timeout_ms=5000,
+        )
+    assert exc_info.value.net_evidence is not None
+    assert len(exc_info.value.net_evidence) == 1
+    assert exc_info.value.net_evidence[0]["error_text"] == "net::ERR_CONNECTION_RESET"
+
+
+@pytest.mark.asyncio
+async def test_streaming_gateway_raises_on_empty_200_stream_and_retains_trailing_usage():
+    """Verify StreamingGateway rejects 200 stream with 0 chunks and retains trailing usage chunks after finish_reason."""
+    mock_session = MagicMock(spec=BrowserSession)
+    captured = CapturedRequest(
+        url="https://alkalimakersuite-pa.clients6.google.com/$rpc/GenerateContent",
+        headers={},
+        body='["models/gemini-3.7-flash"]',
+        model="models/gemini-3.7-flash",
+    )
+    gateway = StreamingGateway(session=mock_session)
+
+    # 1. Empty 200 stream raises BrowserTransportError
+    async def empty_stream(**_kwargs):
+        yield ("status", 200)
+
+    mock_session.send_streaming_request = MagicMock(side_effect=empty_stream)
+    with pytest.raises(
+        BrowserTransportError, match="stream ended before any data arrived"
+    ):
+        async for _ in gateway.stream_chat(
+            captured=captured, model="models/gemini-3.7-flash"
+        ):
+            pass
+
+    # 2. Trailing usage chunk after finish_reason=1 (and intermediate finish_reason=22) is preserved
+    async def multi_chunk_stream(**_kwargs):
+        yield ("status", 200)
+        payload = json.dumps(
+            [
+                [
+                    [
+                        [[[[[None, "Part 1 "]], "model"], 22]],
+                    ],
+                    [
+                        [[[[[None, "Part 2"]], "model"], 1]],
+                    ],
+                    [
+                        None,
+                        None,
+                        [15, 25, 40, 10, None, None, None, None, None, 5],
+                        None,
+                        None,
+                        None,
+                        None,
+                        "resp_final_99",
+                    ],
+                ]
+            ]
+        ).encode("utf-8")
+        yield ("chunk", payload)
+
+    mock_session.send_streaming_request = MagicMock(side_effect=multi_chunk_stream)
+    events = [
+        ev
+        async for ev in gateway.stream_chat(
+            captured=captured, model="models/gemini-3.7-flash"
+        )
+    ]
+    assert ("body", "Part 1 ") in events
+    assert ("body", "Part 2") in events
+    assert ("finish_reason", 1) in events
+    assert ("response_id", "resp_final_99") in events
+    usage_events = [payload for kind, payload in events if kind == "usage"]
+    assert len(usage_events) == 1
+    assert isinstance(usage_events[0], dict)
+    assert usage_events[0]["prompt_tokens"] == 15
+    assert usage_events[0]["cached_tokens"] == 10

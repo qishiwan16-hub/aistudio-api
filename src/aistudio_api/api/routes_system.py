@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from typing import TYPE_CHECKING
 
 import yaml
@@ -36,9 +37,15 @@ def health_response() -> HealthResponse:
 
 
 def stats_response() -> StatsResponse:
+    from aistudio_api.api.response_models import AccountBreakdownItem
     from aistudio_api.api.state import runtime_state
+    from aistudio_api.infrastructure.gateway.model_defaults import resolve_tier_quota
 
     stats = dict(runtime_state.model_stats)
+    rotator = runtime_state.rotator
+    account_svc = runtime_state.account_service
+    accounts_list = account_svc.list_accounts() if account_svc else []
+
     totals = StatsTotalsResponse(
         requests=sum(s.requests for s in stats.values()),
         success=sum(s.success for s in stats.values()),
@@ -46,21 +53,64 @@ def stats_response() -> StatsResponse:
         errors=sum(s.errors for s in stats.values()),
         prompt_tokens=sum(s.prompt_tokens for s in stats.values()),
         completion_tokens=sum(s.completion_tokens for s in stats.values()),
+        reasoning_tokens=sum(s.reasoning_tokens for s in stats.values()),
+        cached_tokens=sum(s.cached_tokens for s in stats.values()),
         total_tokens=sum(s.total_tokens for s in stats.values()),
     )
-    models = {
-        name: ModelStatsResponse(
+
+    models = {}
+    for name, s in stats.items():
+        clean_m = name.removeprefix("models/").lower()
+        breakdown: list[AccountBreakdownItem] = []
+
+        if rotator:
+            from aistudio_api.application.account_rotator import get_pacific_date_key
+
+            current_la = get_pacific_date_key()
+            for acc in accounts_list:
+                st = rotator.get_account_stats(acc.id)
+                if st:
+                    st._check_date_reset(current_la)
+                    if clean_m in st.daily_models:
+                        m_daily = st.daily_models[clean_m]
+                        quota = resolve_tier_quota(acc.tier, clean_m)
+                        used_pct = round((m_daily.requests / max(1, quota)) * 100, 1)
+                        cd_rem = max(0, int(m_daily.cooldown_until - time.time())) if m_daily.cooldown_until > time.time() else 0
+                        breakdown.append(
+                            AccountBreakdownItem(
+                                account_id=acc.id,
+                                name=acc.name,
+                                auth_user=acc.auth_user,
+                                email=acc.email,
+                                tier=acc.tier,
+                                group=acc.group,
+                                enabled=acc.enabled,
+                                today_requests=m_daily.requests,
+                                today_success=m_daily.success,
+                                today_rate_limited=m_daily.rate_limited,
+                                today_tokens=m_daily.total_tokens,
+                                today_reasoning_tokens=m_daily.reasoning_tokens,
+                                configured_quota=quota,
+                                quota_used_percent=used_pct,
+                                is_available=acc.enabled and cd_rem == 0 and not st.session_expired,
+                                cooldown_remaining=cd_rem,
+                            )
+                        )
+
+        models[name] = ModelStatsResponse(
             requests=s.requests,
             success=s.success,
             rate_limited=s.rate_limited,
             errors=s.errors,
             prompt_tokens=s.prompt_tokens,
             completion_tokens=s.completion_tokens,
+            reasoning_tokens=s.reasoning_tokens,
+            cached_tokens=s.cached_tokens,
             total_tokens=s.total_tokens,
+            finish_reasons=dict(s.finish_reasons),
             last_used=s.last_used,
+            account_breakdown=breakdown,
         )
-        for name, s in stats.items()
-    }
     return StatsResponse(models=models, totals=totals)
 
 

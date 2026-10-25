@@ -7,15 +7,23 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from aistudio_api.config import settings
-from aistudio_api.domain.errors import RequestError, classify_error
+from aistudio_api.domain.errors import (
+    BrowserTransportError,
+    RequestError,
+    classify_error,
+)
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.stream_parser import (
     IncrementalJSONStreamParser,
 )
 from aistudio_api.infrastructure.gateway.wire_parser import (
+    WIRE_RESPONSE_ID_INDEX,
     parse_chunk_usage,
     parse_response_chunk,
+)
+from aistudio_api.infrastructure.gateway.wire_spec import (
+    WIRE_FINISH_REASON_CONTINUING,
 )
 from aistudio_api.infrastructure.utils.logger import get_logger
 
@@ -108,14 +116,17 @@ class StreamingGateway:
                         latest_usage = usage
                     if (
                         isinstance(parsed_chunk, list)
-                        and len(parsed_chunk) > 7
-                        and isinstance(parsed_chunk[7], str)
-                        and parsed_chunk[7]
+                        and len(parsed_chunk) > WIRE_RESPONSE_ID_INDEX
+                        and isinstance(parsed_chunk[WIRE_RESPONSE_ID_INDEX], str)
+                        and parsed_chunk[WIRE_RESPONSE_ID_INDEX]
                     ):
-                        latest_response_id = parsed_chunk[7]
+                        latest_response_id = str(parsed_chunk[WIRE_RESPONSE_ID_INDEX])
                         yield ("response_id", latest_response_id)
                     candidate = parse_response_chunk(parsed_chunk)
-                    if candidate.finish_reason is not None:
+                    if (
+                        candidate.finish_reason is not None
+                        and candidate.finish_reason != WIRE_FINISH_REASON_CONTINUING
+                    ):
                         latest_finish_reason = candidate.finish_reason
                     if candidate.thinking:
                         yield ("thinking", candidate.thinking)
@@ -129,10 +140,6 @@ class StreamingGateway:
                         yield ("body", candidate.text)
                     if candidate.thought_signature:
                         yield ("thought_signature", candidate.thought_signature)
-                    if latest_finish_reason is not None:
-                        break
-                if latest_finish_reason is not None:
-                    break
         raw_response = "".join(raw_parts)
         _dump_stream_exchange(
             model=model,
@@ -153,7 +160,10 @@ class StreamingGateway:
             if detail:
                 raise RequestError(status_code, detail)
             raise RequestError(status_code, "")
-
+        if not raw_parts:
+            raise BrowserTransportError(
+                "stream ended before any data arrived (connection truncated)"
+            )
         if latest_finish_reason is not None:
             yield ("finish_reason", latest_finish_reason)
         yield ("usage", latest_usage)

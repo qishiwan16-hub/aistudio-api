@@ -29,6 +29,7 @@ from aistudio_api.application.chat_service import (
 from aistudio_api.domain.errors import (
     AistudioError,
     AuthError,
+    BrowserTransportError,
     RequestError,
     SessionExpiredError,
     UsageLimitExceeded,
@@ -48,8 +49,8 @@ WIRE_TO_GEMINI_FINISH_REASON: dict[int, str] = {
     2: "MAX_TOKENS",
     3: "SAFETY",
     4: "RECITATION",
-    5: "LANGUAGE",
-    6: "OTHER",
+    5: "OTHER",
+    6: "LANGUAGE",
     7: "BLOCKLIST",
     8: "PROHIBITED_CONTENT",
     9: "SPII",
@@ -58,9 +59,10 @@ WIRE_TO_GEMINI_FINISH_REASON: dict[int, str] = {
     12: "UNEXPECTED_TOOL_CALL",
     13: "TOO_MANY_TOOL_CALLS",
     14: "IMAGE_PROHIBITED_CONTENT",
-    15: "NO_IMAGE",
-    16: "IMAGE_RECITATION",
-    17: "IMAGE_OTHER",
+    15: "IMAGE_OTHER",
+    16: "NO_IMAGE",
+    17: "IMAGE_RECITATION",
+    18: "MISSING_THOUGHT_SIGNATURE",
 }
 
 
@@ -86,6 +88,7 @@ def clean_upstream_error_message(raw_msg: str) -> str:
             break
     _, msg = parse_upstream_grpc_error(inner)
     return msg or inner
+
 
 def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
     """Extract standard Gemini HTTP status code, message, and status string from an exception."""
@@ -114,6 +117,7 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
             404: "NOT_FOUND",
             429: "RESOURCE_EXHAUSTED",
             500: "INTERNAL",
+            502: "UNAVAILABLE",
             503: "UNAVAILABLE",
         }
         return (
@@ -131,6 +135,7 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
             404: "NOT_FOUND",
             429: "RESOURCE_EXHAUSTED",
             500: "INTERNAL",
+            502: "UNAVAILABLE",
             503: "UNAVAILABLE",
         }
         return (
@@ -138,9 +143,10 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
             clean_msg,
             status_map.get(status, "INTERNAL" if status >= 500 else "UNKNOWN"),
         )
+    if isinstance(exc, BrowserTransportError):
+        return 502, str(exc), "UNAVAILABLE"
     if isinstance(exc, AistudioError):
         return 500, str(exc), "INTERNAL"
-
     return 500, str(exc), "INTERNAL"
 
 
@@ -235,7 +241,11 @@ async def handle_attempt_exception(
 
     # 针对 Google 上游偶发且完全随机的 RPC 路由 404 (Ambiguous request for service '' and method '/GenerativeService.*')：
     # 此报错为上游端点偶发抖动，在未产生输出时当场立即重试（严禁切号以防浪费配额，其他 404 严格按原样报错抛出）
-    if is_transient_rpc_error(exc) and not has_yielded_data and attempt < MAX_RETRIES - 1:
+    if (
+        is_transient_rpc_error(exc)
+        and not has_yielded_data
+        and attempt < MAX_RETRIES - 1
+    ):
         logger.warning(
             "检测到 Google 上游偶发 404 (Ambiguous RPC method)，当场立即重试 (%d/%d): %s",
             attempt + 1,
@@ -279,6 +289,13 @@ async def handle_attempt_exception(
             if client._session is not None:
                 await client._session._close_internal()
             return True
+        if isinstance(exc, BrowserTransportError):
+            runtime_state.record(target_model, "errors")
+            record_rotator_event("error", model=target_model)
+            logger.warning("Gemini 浏览器传输层中断 (502): %s", exc)
+            raise HTTPException(
+                502, detail={"message": str(exc), "type": "upstream_error"}
+            ) from exc
     if isinstance(exc, RequestError):
         clean_msg = clean_upstream_error_message(str(exc))
         status_code = exc.status if exc.status > 0 else 500
@@ -382,13 +399,15 @@ async def handle_gemini_generate_content(
                 sanitize_plain_text=False,
             )
 
-            record_rotator_event("success", model=normalized.model)
-            runtime_state.record(normalized.model, "success", output.usage)
-            logger.info(
-                "Gemini 生成完成: model=%s, 输入Tokens=%s, 输出Tokens=%s",
+            final_fr = to_gemini_finish_reason(
+                output.candidates[0].finish_reason if output.candidates else None
+            )
+            record_rotator_event("success", model=normalized.model, usage=output.usage)
+            runtime_state.record(
                 normalized.model,
-                output.usage.get("prompt_tokens") if output.usage else 0,
-                output.usage.get("completion_tokens") if output.usage else 0,
+                "success",
+                usage=output.usage,
+                finish_reason=final_fr,
             )
             return GeminiGenerateContentResponse(
                 candidates=[
@@ -426,7 +445,6 @@ async def handle_gemini_generate_content(
             ):
                 continue
             raise
-
 
     raise HTTPException(
         429,
@@ -627,15 +645,16 @@ def _build_gemini_streaming_response(
                     raise
 
             target_model = normalized.model if normalized else model_path
-            record_rotator_event("success", model=target_model)
-            if normalized is not None:
-                runtime_state.record(normalized.model, "success", final_usage)
-            logger.info(
-                "Gemini 流式完成: model=%s, 输入Tokens=%s, 输出Tokens=%s",
-                target_model,
-                final_usage.get("prompt_tokens") if final_usage else 0,
-                final_usage.get("completion_tokens") if final_usage else 0,
+            record_rotator_event(
+                "success", model=target_model, usage=final_usage
             )
+            if normalized is not None:
+                runtime_state.record(
+                    normalized.model,
+                    "success",
+                    usage=final_usage,
+                    finish_reason=final_finish_reason,
+                )
             yield format_sse_usage(
                 final_usage,
                 finish_reason=final_finish_reason,
@@ -644,7 +663,6 @@ def _build_gemini_streaming_response(
             )
         except Exception as exc:
             yield format_sse_error(exc)
-
 
     return StreamingResponse(
         stream_response(),

@@ -20,7 +20,7 @@ from aistudio_api.infrastructure.browser.scripts import (
     CHECK_IDENTITY_JS,
     EXTRACT_EMAIL_JS,
 )
-from aistudio_api.infrastructure.utils.common import mask_email
+from aistudio_api.infrastructure.utils.common import atomic_write_json, mask_email
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 log = get_logger("session.auth")
@@ -120,6 +120,7 @@ async def load_cookies_to_page(page: CDPPage, auth_file: str | None) -> bool:
     """Inject cookies from auth_file into target page with session-conflict filtering."""
     if not auth_file or not Path(auth_file).is_file():
         return False
+    page.account_auth_file = auth_file
     try:
         with suppress(Exception):
             await page.cdp.send("Network.clearBrowserCookies")
@@ -274,10 +275,7 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
             meta["email"] = discovered_email
             expected_email = discovered_email.strip().lower()
             with suppress(Exception):
-                meta_path.write_text(
-                    json.dumps(meta, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                atomic_write_json(meta_path, meta)
             with suppress(Exception):
                 from aistudio_api.infrastructure.account.account_store import (
                     AccountStore,
@@ -312,10 +310,7 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
         if discovered_tier:
             meta["tier"] = discovered_tier
             with suppress(Exception):
-                meta_path.write_text(
-                    json.dumps(meta, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                atomic_write_json(meta_path, meta)
             with suppress(Exception):
                 from aistudio_api.infrastructure.account.account_store import (
                     AccountStore,
@@ -390,11 +385,7 @@ async def save_browser_cookies(
             with suppress(Exception):
                 existing = json.loads(auth_path.read_text(encoding="utf-8"))
                 origins = existing.get("origins", [])
-        auth_path.parent.mkdir(parents=True, exist_ok=True)
-        auth_path.write_text(
-            json.dumps({"cookies": current_cookies, "origins": origins}, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_json(auth_path, {"cookies": current_cookies, "origins": origins})
         log.info("已保存 %d 个 Cookie 至 %s", len(current_cookies), auth_file)
     except Exception as e:
         log.debug("保存 Cookie 失败: %s", e)

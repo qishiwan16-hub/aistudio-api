@@ -31,6 +31,7 @@ def _get_switch_lock() -> asyncio.Lock:
 async def try_switch_account(
     model: str | None = None,
     failed_account_id: str | None = None,
+    required_tiers: tuple[str, ...] | list[str] | None = None,
     *,
     is_auth_error: bool = False,
     is_session_expired: bool = False,
@@ -38,6 +39,13 @@ async def try_switch_account(
     """尝试切换到下一个对目标 model 可用的账号。防止并发级联切号。"""
     global _last_switch_time
     entry_time = time.time()
+
+    if model and not required_tiers:
+        from aistudio_api.infrastructure.gateway.model_discovery import model_discovery
+
+        tiers = model_discovery.get_required_tiers(model)
+        if tiers:
+            required_tiers = tuple(tiers)
 
     # 乐观快速预检：若无需记录永久失效/短时隔离，且当前活跃账号已被并发请求切换至健康状态，直接免锁复用
     if failed_account_id and not is_session_expired and not is_auth_error:
@@ -51,6 +59,7 @@ async def try_switch_account(
                     cur_active.id != failed_account_id
                     or _last_switch_time >= entry_time
                 )
+                and (not required_tiers or cur_active.tier in required_tiers)
                 and rotator.is_account_available(cur_active.id, model=model)
             ):
                 return True
@@ -76,6 +85,7 @@ async def try_switch_account(
             _last_switch_time >= entry_time
             and current_id
             and (not is_session_expired or current_id != failed_account_id)
+            and (not required_tiers or (current_active and current_active.tier in required_tiers))
             and rotator.is_account_available(current_id, model=model)
         ):
             logger.info(
@@ -96,6 +106,7 @@ async def try_switch_account(
             failed_account_id
             and current_id
             and current_id != failed_account_id
+            and (not required_tiers or (current_active and current_active.tier in required_tiers))
             and rotator.is_account_available(current_id, model=model)
         ):
             logger.info(
@@ -109,6 +120,7 @@ async def try_switch_account(
             model=model,
             current_account_id=current_id,
             failed_account_id=failed_account_id,
+            required_tiers=required_tiers,
             is_session_expired=is_session_expired,
         )
         if next_account is None:
@@ -151,29 +163,70 @@ async def try_switch_account(
                 _last_switch_time = time.time()
             return result is not None
         return bool(
-            current_id and rotator.is_account_available(current_id, model=model)
+            current_id
+            and (not required_tiers or (current_active and current_active.tier in required_tiers))
+            and rotator.is_account_available(current_id, model=model)
         )
 
 
 async def ensure_active_account(attempt: int, model: str | None = None) -> None:
-    """确保在初次尝试时存在活跃账号，且该账号对目标模型可用。"""
+    """确保在初次尝试时存在活跃账号，且若请求付费模型而当前账号权益不足时主动抢切。"""
     if attempt != 0:
         return
     account_svc = runtime_state.account_service
     rotator = runtime_state.rotator
     current = account_svc.get_active_account() if account_svc else None
+
+    # 核心拦截：检测目标模型是否为 Paid 模型且当前账号层级不满足要求
+    if model:
+        from fastapi import HTTPException
+
+        from aistudio_api.infrastructure.gateway.model_discovery import model_discovery
+
+        if model_discovery.is_paid_model(model):
+            req_tier = model_discovery.get_required_tier(model)
+            req_tiers = model_discovery.get_required_tiers(model)
+            allowed_tiers = set(req_tiers) if req_tiers else ({"Pro", "Ultra", "Ultra_20X"} if req_tier == "Pro" else {"Ultra", "Ultra_20X"})
+            cur_tier = (current.tier if current else None) or "Free"
+            if not current or cur_tier not in allowed_tiers:
+                logger.info(
+                    "检测到模型 %s 需 %s 权限，当前账号 %s 为 %s，主动切换至付费账号",
+                    model,
+                    req_tier,
+                    current.id if current else "None",
+                    cur_tier,
+                )
+                switched = await try_switch_account(
+                    model=model,
+                    required_tiers=tuple(req_tiers)
+                    if req_tiers
+                    else tuple(allowed_tiers),
+                )
+                if not switched:
+                    logger.warning(
+                        "请求付费模型 %s 时，账号池中无就绪的 Pro/Ultra 账号，本地 Fast-Fail 403",
+                        model,
+                    )
+                    raise HTTPException(
+                        status_code=403,
+                        detail={
+                            "message": f"模型 '{model}' 需要 Google AI Studio {req_tier} 订阅，当前账号池中无就绪的付费账号。",
+                            "type": "permission_denied",
+                        },
+                    )
+                return
+
     if not current:
         await try_switch_account(model=model)
     elif (
         rotator and model and not rotator.is_account_available(current.id, model=model)
     ):
-        # 当前账号对该模型已限流，提前切号
         await try_switch_account(model=model, failed_account_id=current.id)
-
 
 def record_rotator_event(
     event: str,
     model: str | None = None,
+    usage: dict[str, object] | None = None,
 ) -> None:
     """记录调度器事件（成功、限流、错误、鉴权异常）。"""
     rotator = runtime_state.rotator
@@ -182,14 +235,13 @@ def record_rotator_event(
     if not rotator or account is None:
         return
     if event == "success":
-        rotator.record_success(account.id, model=model)
+        rotator.record_success(account.id, model=model, usage=usage)
     elif event == "rate_limited":
         rotator.record_rate_limited(account.id, model=model)
     elif event == "auth_error":
         rotator.record_auth_error(account.id, model=model)
     elif event == "error":
         rotator.record_error(account.id, model=model)
-
 
 __all__ = [
     "MAX_RETRIES",

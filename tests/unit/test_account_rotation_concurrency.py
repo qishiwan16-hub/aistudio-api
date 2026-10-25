@@ -131,12 +131,12 @@ async def test_account_stats_per_model_cooldown():
 async def test_account_stats_pacific_midnight_reset():
     """测试美西跨天日限额自动恢复。"""
     stats = AccountStats(account_id="acc_1")
-    stats.model_cooldowns["gemini-2.5-pro"] = time.time() + 3600
-    stats.model_rate_limited_dates["gemini-2.5-pro"] = "2020-01-01"  # 过去的日期
+    m_stats = stats.get_model_daily("gemini-2.5-pro")
+    m_stats.cooldown_until = time.time() + 3600
+    stats.daily_date_la = "2020-01-01"  # 过去的日期
 
     assert stats.is_available("gemini-2.5-pro")
-    assert "gemini-2.5-pro" not in stats.model_rate_limited_dates
-
+    assert stats.daily_date_la != "2020-01-01"
 
 @pytest.mark.asyncio
 async def test_account_stats_clear_cooldown_resets_counter():
@@ -152,13 +152,13 @@ async def test_account_stats_clear_cooldown_resets_counter():
     # 手动清除冷却
     stats.clear_cooldown(model="gemini-2.5-pro")
     assert stats.is_available("gemini-2.5-pro")
-    assert "gemini-2.5-pro" not in stats.model_rate_limited
+    m_stats = stats.get_model_daily("gemini-2.5-pro")
+    assert m_stats.rate_limited == 0
 
     # 下一次遇到 429 应重新享有 60s 临时冷却，而不是直接锁到午夜
     stats.record_rate_limited(model="gemini-2.5-pro")
     rem = stats.get_cooldown_remaining("gemini-2.5-pro")
     assert 0 < rem <= 60.0
-
 
 @pytest.mark.asyncio
 async def test_rotator_sticky_mode():
@@ -492,7 +492,7 @@ async def test_rotator_prioritizes_least_used_account():
 
     rotator = AccountRotator(account_store=store)
     # acc1 调用了 50 次，acc2 只调用了 5 次 (使用公共 record_success 接口填充状态)
-    for _ in range(50):
+    for _ in range(15):
         rotator.record_success("acc_1", model="gemini-3.8-flash")
     for _ in range(5):
         rotator.record_success("acc_2", model="gemini-3.8-flash")
@@ -503,7 +503,6 @@ async def test_rotator_prioritizes_least_used_account():
     )
     assert chosen is not None
     assert chosen.id == "acc_1"
-
     # 2. 发生故障转移（如 acc1 触发 429）或初次调度时：优先选择调用次数少的 acc2
     chosen_failover = await rotator.get_next_account(
         model="models/gemini-3.8-flash",
@@ -513,25 +512,23 @@ async def test_rotator_prioritizes_least_used_account():
     assert chosen_failover is not None
     assert chosen_failover.id == "acc_2"
 
-    # 3. 前缀统一规范化：带 models/ 前缀与不带前缀均指向相同的调用计数
     rotator.record_success("acc_2", model="models/gemini-3.8-flash")
     acc2_stats = rotator.get_account_stats("acc_2")
     assert acc2_stats is not None
-    assert acc2_stats.model_requests["gemini-3.8-flash"] == 6
+    assert acc2_stats.get_model_daily("gemini-3.8-flash").requests == 6
 
 
 @pytest.mark.asyncio
 async def test_model_requests_midnight_reset():
-    """测试美西午夜跨天后，模型的单日请求计数与限流锁定自动归零刷新。"""
     stats = AccountStats(account_id="acc_1")
-    stats.model_requests["gemini-3.8-flash"] = 50
-    stats.model_requests_dates["gemini-3.8-flash"] = "2020-01-01"  # 过去的日期
-    stats.model_cooldowns["gemini-3.8-flash"] = time.time() + 3600
-    stats.model_rate_limited_dates["gemini-3.8-flash"] = "2020-01-01"
+    m_stats = stats.get_model_daily("gemini-3.8-flash")
+    m_stats.requests = 50
+    m_stats.cooldown_until = time.time() + 3600
+    stats.daily_date_la = "2020-01-01"  # 过去的日期
 
     # 跨天后自动恢复可用且单日请求计数清零
     assert stats.is_available("gemini-3.8-flash")
-    assert stats.model_requests["gemini-3.8-flash"] == 0
+    assert stats.get_model_daily("gemini-3.8-flash").requests == 0
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ class GeminiUsageMetadata(BaseModel):
     candidatesTokenCount: int = 0
     thoughtsTokenCount: int = 0
     totalTokenCount: int = 0
+    cachedContentTokenCount: int | None = None
 
 
 class GeminiFunctionCallPayload(BaseModel):
@@ -63,6 +64,25 @@ class HealthResponse(BaseModel):
     busy: bool
 
 
+class AccountBreakdownItem(BaseModel):
+    account_id: str
+    name: str
+    auth_user: str = "0"
+    email: str | None = None
+    tier: str = "Free"
+    group: str = "default"
+    enabled: bool = True
+    today_requests: int = 0
+    today_success: int = 0
+    today_rate_limited: int = 0
+    today_tokens: int = 0
+    today_reasoning_tokens: int = 0
+    configured_quota: int = 100
+    quota_used_percent: float = 0.0
+    is_available: bool = True
+    cooldown_remaining: int = 0
+
+
 class ModelStatsResponse(BaseModel):
     requests: int
     success: int
@@ -70,8 +90,12 @@ class ModelStatsResponse(BaseModel):
     errors: int
     prompt_tokens: int
     completion_tokens: int
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
     total_tokens: int
+    finish_reasons: dict[str, int] = {}
     last_used: str | None = None
+    account_breakdown: list[AccountBreakdownItem] = []
 
 
 class StatsTotalsResponse(BaseModel):
@@ -81,13 +105,14 @@ class StatsTotalsResponse(BaseModel):
     errors: int
     prompt_tokens: int
     completion_tokens: int
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
     total_tokens: int
 
 
 class StatsResponse(BaseModel):
     models: dict[str, ModelStatsResponse]
     totals: StatsTotalsResponse
-
 
 class GeminiModelResponse(BaseModel):
     name: str
