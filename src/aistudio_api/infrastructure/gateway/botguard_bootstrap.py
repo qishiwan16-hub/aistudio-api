@@ -212,14 +212,17 @@ async def bootstrap_botguard_and_template(
 
     # ── 等待页面 Angular 渲染就绪（textarea 出现即提前跳出）──
     for _ready_i in range(15):
-        is_ready = await page.evaluate(
-            """() => {
-                if (document.querySelector('textarea')) return 'textarea';
-                if (document.querySelector('.mdc-text-field, .prompt-input, mat-form-field')) return 'form';
-                return '';
-            }""",
-            timeout_s=5,
-        )
+        try:
+            is_ready = await page.evaluate(
+                """() => {
+                    if (document.querySelector('textarea')) return 'textarea';
+                    if (document.querySelector('.mdc-text-field, .prompt-input, mat-form-field')) return 'form';
+                    return '';
+                }""",
+                timeout_s=5,
+            )
+        except Exception:
+            is_ready = ""
         if is_ready:
             log.debug("页面就绪检查通过: %s (iter=%d)", is_ready, _ready_i)
             break
