@@ -85,7 +85,7 @@ async def lifespan(_app: FastAPI):
                 if attempt < 2:
                     await asyncio.sleep(1.0)
                     continue
-                logger.warning("浏览器预热失败: %s", e)
+                logger.warning("浏览器预热失败: %r", e, exc_info=True)
 
     warmup_task = asyncio.create_task(_warmup())
 

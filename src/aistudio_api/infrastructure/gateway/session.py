@@ -383,7 +383,7 @@ class BrowserSession:
 
             except Exception as exc:
                 self._gate.set_failed(exc)
-                log.error("会话切换失败: %s", exc)
+                log.error("会话切换失败: %r", exc, exc_info=True)
                 raise
 
     async def _drain_retiring_context(
