@@ -585,6 +585,7 @@ def _build_gemini_streaming_response(
             final_finish_reason: str = "STOP"
             latest_response_id: str | None = None
             buffered_thought_sig: str | None = None
+            prefill_deduper = None  # 预填充流式去重器
             for stream_attempt in range(MAX_RETRIES):
                 has_yielded_data = False
                 await ensure_active_account(stream_attempt, model=model_path)
@@ -607,6 +608,19 @@ def _build_gemini_streaming_response(
                         sanitize_plain_text=False,
                         force_refresh_capture=stream_attempt > 0,
                     ):
+                        if event_type == "prefill":
+                            # 预填充：先把预填充文本作为第一个 body chunk 发出去
+                            from aistudio_api.application.prefill import StreamDeduper
+                            prefill_deduper = StreamDeduper(str(text))
+                            chunk = format_sse_event(
+                                "body", str(text),
+                                model_version=normalized.model,
+                                response_id=latest_response_id,
+                            )
+                            if chunk:
+                                has_yielded_data = True
+                                yield chunk
+                            continue
                         if event_type == "usage":
                             final_usage = text if isinstance(text, dict) else None
                         elif event_type == "finish_reason":
@@ -620,9 +634,15 @@ def _build_gemini_streaming_response(
                         elif event_type == "thought_signature":
                             buffered_thought_sig = str(text)
                         else:
+                            # 预填充去重：模型可能重复预填充内容
+                            actual_text = text
+                            if prefill_deduper is not None and event_type == "body" and text:
+                                actual_text = prefill_deduper.feed(str(text))
+                                if not actual_text:
+                                    continue
                             chunk = format_sse_event(
                                 event_type,
-                                text,
+                                actual_text,
                                 model_version=normalized.model,
                                 response_id=latest_response_id,
                                 thought_signature=buffered_thought_sig,
@@ -631,6 +651,17 @@ def _build_gemini_streaming_response(
                             if chunk:
                                 has_yielded_data = True
                                 yield chunk
+                    # 预填充去重器 flush：流结束时把缓冲里剩余的内容发出去
+                    if prefill_deduper is not None:
+                        remainder = prefill_deduper.flush()
+                        if remainder:
+                            rem_chunk = format_sse_event(
+                                "body", remainder,
+                                model_version=normalized.model,
+                                response_id=latest_response_id,
+                            )
+                            if rem_chunk:
+                                yield rem_chunk
                     break
                 except Exception as exc:
                     if await handle_attempt_exception(

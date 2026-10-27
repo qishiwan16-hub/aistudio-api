@@ -205,6 +205,8 @@ class AIStudioClient:
             )
             if not captured:
                 raise RequestError(0, "无法拦截请求")
+            if captured.prefill_text:
+                yield ("prefill", captured.prefill_text)
             async for event in self._streaming_gateway.stream_chat(
                 captured=captured,
                 model=model,
@@ -269,6 +271,10 @@ class AIStudioClient:
                 raise BrowserTransportError("empty 200 body (connection truncated)")
             output = parse_text_output(raw_text)
             output.model = model
+            # 预填充兼容：把预填充文本拼回响应开头
+            if captured.prefill_text and output.text:
+                from aistudio_api.application.prefill import rejoin
+                output.text = rejoin(captured.prefill_text, output.text)
             return output
 
     @classmethod

@@ -261,7 +261,7 @@ class AistudioWireCodec:
         max_tokens: int | None = None,
         generation_config_overrides: dict | None = None,
         sanitize_plain_text: bool = True,
-        safety_off: bool = False,
+        safety_off: bool = True,
     ) -> str:
         request = self.decode(original_body)
         request.model = model
@@ -301,7 +301,9 @@ class AistudioWireCodec:
         if top_p is not None:
             request.generation_config.top_p = top_p
         if top_k is not None:
-            request.generation_config.top_k = top_k
+            request.generation_config.top_k = min(top_k, 63)  # AI Studio 上限 63
+        elif request.generation_config.top_k is not None and request.generation_config.top_k > 63:
+            request.generation_config.top_k = 63
         for attr, value in (generation_config_overrides or {}).items():
             if value is None or not hasattr(request.generation_config, attr):
                 continue
@@ -488,7 +490,7 @@ def modify_body(
     max_tokens: int | None = None,
     generation_config_overrides: dict | None = None,
     sanitize_plain_text: bool = True,
-    safety_off: bool = False,
+    safety_off: bool = True,
 ) -> str:
     return _codec.rewrite(
         original_body=original_body,

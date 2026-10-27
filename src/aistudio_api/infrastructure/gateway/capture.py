@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from aistudio_api.config import DEFAULT_TEXT_MODEL
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.wire_codec import modify_body
+from aistudio_api.infrastructure.gateway.signatures import apply_signature_sentinels
+from aistudio_api.application.prefill import apply_prefill
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 from aistudio_api.infrastructure.utils.logger import get_logger
 
@@ -33,6 +35,7 @@ class CapturedRequest:
     body: str
     model: str = ""
     snapshot: str = ""
+    prefill_text: str = ""
 
 
 class RequestCaptureService:
@@ -72,12 +75,30 @@ class RequestCaptureService:
             self._templates.pop(model, None)
         template = await self._ensure_template(model)
         rewritten_contents = contents
+
+        # 预填充兼容：酒馆以 assistant 结尾会被 Gemini 400 拒绝，
+        # 追加 user 续写指令并记录预填充文本（响应时拼回开头）
+        prefill_text = ""
+        if rewritten_contents:
+            prefill_text = apply_prefill(rewritten_contents)
+            if prefill_text:
+                logger.info("预填充兼容: %d 字", len(prefill_text))
+
         snapshot_contents = rewritten_contents or [
             AistudioContent.from_user_prompt(prompt=prompt, images=images)
         ]
 
         # 签名是一次性的票据（根据请求内容穿进 snapshot 计算），每次请求实时生成，不可复用缓存
         snapshot = await self._session.generate_snapshot(snapshot_contents)
+
+        # 签名哨兵：把 thoughtSignature 替换为官方逃生口，避免上游"校验后替换内容"的死循环
+        if rewritten_contents:
+            sig_count = apply_signature_sentinels(
+                rewritten_contents,
+                system_instruction=system_instruction_content,
+            )
+            if sig_count:
+                logger.debug("签名哨兵: 替换了 %d 个 thoughtSignature", sig_count)
 
         body = modify_body(
             template.body,
@@ -104,6 +125,7 @@ class RequestCaptureService:
             body=body,
             model=model,
             snapshot=snapshot,
+            prefill_text=prefill_text,
         )
         logger.info(
             "Hook 拦截成功: model=%s, snapshot=%s chars, body=%s chars",
