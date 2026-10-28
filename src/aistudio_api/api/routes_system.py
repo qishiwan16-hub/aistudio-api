@@ -119,6 +119,12 @@ async def health():
     return health_response()
 
 
+@public_router.get("/wd/hub/status", response_model=HealthResponse)
+async def webdriver_status():
+    """兼容 Selenium/WebDriver 风格的外部健康检查探测路径。"""
+    return health_response()
+
+
 @protected_router.get("/stats", response_model=StatsResponse)
 async def stats():
     return stats_response()

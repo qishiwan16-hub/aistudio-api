@@ -24,6 +24,16 @@ async def test_health_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_webdriver_status_endpoint():
+    async with _client() as client:
+        resp = await client.get("/wd/hub/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["busy"] is False
+
+
+@pytest.mark.asyncio
 async def test_auth_check_endpoint():
     async with _client() as client:
         resp = await client.get("/auth/check")
