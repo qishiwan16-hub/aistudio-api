@@ -312,8 +312,8 @@ async def _openai_stream(
     """
     HEARTBEAT_INTERVAL = 2  # 秒
     _SENTINEL = None  # 结束哨兵
-
-    output_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    # 给慢客户端施加背压，避免后台生产者把长回复无限堆进内存。
+    output_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=32)
     done_event = asyncio.Event()
 
     async def _heartbeat_sender():
