@@ -159,7 +159,7 @@ def build_chromium_args(
         "--disable-breakpad",
         "--mute-audio",
         "--disable-site-isolation-trials",
-        "--js-flags=--max-old-space-size=512 --expose-gc --optimize-for-size",
+        "--js-flags=--max-old-space-size=128 --expose-gc --optimize-for-size",
         "--disk-cache-size=16777216",
         "--media-cache-size=1",
         "--enable-low-end-device-mode",
