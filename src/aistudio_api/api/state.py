@@ -152,14 +152,16 @@ class RuntimeState:
             stats.finish_reasons[clean_fr] = stats.finish_reasons.get(clean_fr, 0) + 1
 
         if usage:
-            pt = int(str(usage.get("prompt_tokens") or 0))
-            ct = int(str(usage.get("completion_tokens") or 0))
-            tt = int(str(usage.get("total_tokens") or 0))
+            pt = int(str(usage.get("prompt_tokens", usage.get("promptTokenCount", 0)) or 0))
+            ct = int(str(usage.get("completion_tokens", usage.get("candidatesTokenCount", 0)) or 0))
+            tt = int(str(usage.get("total_tokens", usage.get("totalTokenCount", 0)) or 0))
             details = usage.get("completion_tokens_details")
             rt = 0
             if isinstance(details, dict):
                 rt = int(str(details.get("reasoning_tokens") or 0))
-            cached = int(str(usage.get("cached_tokens") or 0))
+            if not rt:
+                rt = int(str(usage.get("thoughtsTokenCount", 0) or 0))
+            cached = int(str(usage.get("cached_tokens", usage.get("cachedContentTokenCount", 0)) or 0))
 
             stats.prompt_tokens += pt
             stats.completion_tokens += ct

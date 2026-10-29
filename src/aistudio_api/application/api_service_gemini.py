@@ -686,6 +686,17 @@ def _build_gemini_streaming_response(
                     usage=final_usage,
                     finish_reason=final_finish_reason,
                 )
+            usage_metadata = to_gemini_usage_metadata(final_usage).model_dump(
+                mode="json", exclude_none=True
+            )
+            logger.info(
+                "Gemini 流式生成完成: model=%s, finish_reason=%s, prompt_tokens=%s, completion_tokens=%s, total_tokens=%s",
+                target_model,
+                final_finish_reason,
+                usage_metadata.get("promptTokenCount", 0),
+                usage_metadata.get("candidatesTokenCount", 0),
+                usage_metadata.get("totalTokenCount", 0),
+            )
             yield format_sse_usage(
                 final_usage,
                 finish_reason=final_finish_reason,
