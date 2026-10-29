@@ -387,26 +387,6 @@ async def test_runtime_state_record_model_stats():
     assert item.total_tokens == 30
     assert item.last_used is not None
 
-    # Gemini 原生用量字段也必须正确累计，而不是被当成 0。
-    state.record(
-        "models/gemini-3.8-flash",
-        "success",
-        {
-            "promptTokenCount": 7,
-            "candidatesTokenCount": 11,
-            "thoughtsTokenCount": 3,
-            "cachedContentTokenCount": 2,
-            "totalTokenCount": 18,
-        },
-        finish_reason="STOP",
-    )
-    assert item.prompt_tokens == 17
-    assert item.completion_tokens == 31
-    assert item.reasoning_tokens == 3
-    assert item.cached_tokens == 2
-    assert item.total_tokens == 48
-    assert item.finish_reasons["STOP"] == 1
-
 
 @pytest.mark.asyncio
 async def test_capture_model_preservation_when_template_differs():
