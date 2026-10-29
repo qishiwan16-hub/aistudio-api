@@ -44,7 +44,7 @@ def test_build_chromium_args_contains_stealth_and_mobile_optimizations():
     assert "--disable-dev-shm-usage" in args_str
     assert "--disable-gpu" in args_str
     assert "--in-process-gpu" in args_str
-    assert "--js-flags=--max-old-space-size=128" in args_str
+    assert "--js-flags=--max-old-space-size=512" in args_str
     assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in args_str
     assert "--headless=new" in args_str
     assert "--use-angle=swiftshader" in args_str
