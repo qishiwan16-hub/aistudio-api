@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -91,6 +92,8 @@ class StreamingGateway:
         modified_body = captured.body
         logger.debug("开始流式处理: model=%s, 请求体长度=%d", model, len(modified_body))
         parser = IncrementalJSONStreamParser()
+        # 无浏览器模式下 chunk 是原始字节，汉字可能被切在两个分块之间，需增量解码
+        utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         latest_usage: dict[str, object] | None = None
         latest_finish_reason: int | None = None
         latest_response_id: str | None = None
@@ -108,9 +111,11 @@ class StreamingGateway:
             elif event_type == "chunk" and payload:
                 has_received_chunks = True
                 if isinstance(payload, bytes):
-                    text_payload = payload.decode("utf-8", errors="replace")
+                    text_payload = utf8_decoder.decode(payload, final=False)
                 else:
                     text_payload = str(payload)
+                if not text_payload:
+                    continue
                 if settings.dump_raw_response or status_code != 200:
                     raw_parts.append(text_payload)
                 for parsed_chunk in parser.feed(text_payload):
@@ -144,6 +149,21 @@ class StreamingGateway:
                         yield ("body", candidate.text)
                     if candidate.thought_signature:
                         yield ("thought_signature", candidate.thought_signature)
+        trailing_text = utf8_decoder.decode(b"", final=True)
+        if trailing_text:
+            if settings.dump_raw_response or status_code != 200:
+                raw_parts.append(trailing_text)
+            for parsed_chunk in parser.feed(trailing_text):
+                candidate = parse_response_chunk(parsed_chunk)
+                usage = parse_chunk_usage(parsed_chunk)
+                if usage:
+                    latest_usage = usage
+                if candidate.thinking:
+                    yield ("thinking", candidate.thinking)
+                if candidate.text:
+                    yield ("body", candidate.text)
+                if candidate.thought_signature:
+                    yield ("thought_signature", candidate.thought_signature)
         for parsed_chunk in parser.finish():
             usage = parse_chunk_usage(parsed_chunk)
             if usage:
