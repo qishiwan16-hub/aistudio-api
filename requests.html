@@ -176,6 +176,9 @@ function render() {
     h += '<div class="time-info">' + esc(r.time) + '</div>';
     h += '</div>';
     h += '<div class="meta">';
+    if (r.engine) h += '<div class="meta-item">引擎 <span>' + esc(r.engine) + '</span></div>';
+    if (r.account) h += '<div class="meta-item">账号 <span>' + esc(r.account) + '</span></div>';
+    if (r.sign) h += '<div class="meta-item">签名 <span>' + esc(r.sign) + '</span></div>';
     if (r.mode) h += '<div class="meta-item">模式 <span>' + esc(r.mode) + '</span></div>';
     if (r.turns) h += '<div class="meta-item">对话轮数 <span>' + r.turns + '</span></div>';
     if (r.retry) h += '<div class="meta-item">重试 <span>' + esc(r.retry) + '</span></div>';

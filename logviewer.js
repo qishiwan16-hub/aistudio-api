@@ -57,6 +57,9 @@ function parseRequests() {
   const geminiErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*\[aistudio\.api\.gemini\].*(?:未知严重异常|严重错误|Gemini错误|流式错误|请求处理发生未捕获异常|响应解析异常)[：:]\s*(.+)/;
   const httpErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP (?:GET|POST)\s+(\S+)\s*->\s*(\d+)\s*\(([\d.]+)ms(?:,\s*(.+))?\)/;
   const errRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:ERROR|error|SAFETY|BLOCKED|HARM|RECITATION|RESOURCE_EXHAUSTED|finish_reason.*(?:SAFETY|RECITATION|OTHER))(.+)/i;
+  const signRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*WAA 签名(成功|失败).*?auth_user=(\d+)(?:.*poolState=(\w+))?(?:.*耗时=([\d.]+)ms)?(?:.*(?:错误|响应)=(.+))?/;
+  const directRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*直连 Google (?:流式开始|完成: 非流式).*?auth_user=(\d+), HTTP (\d+)/;
+  const engineRe = /\[engine=browserless\]|直连 Google|WAA 签名/;
   const idleRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*浏览器已空闲.*?(\d+\.?\d*)\s*秒/;
 
   /* 用一个 map 按时间+模型聚合 */
@@ -64,6 +67,15 @@ function parseRequests() {
   /* 标准化模型名: models/gemini-4-argon → gemini-4-argon */
   function normModel(m) { return m.replace(/^models\//, '').trim(); }
   function getKey(time, model) { return time + '|' + normModel(model); }
+  /* 签名/直连日志不带 model，挂到最近 10 分钟内的最新请求 */
+  function latestOpen(ts) {
+    let best = null;
+    for (const v of map.values()) {
+      const diff = ts - v._ts;
+      if (diff >= 0 && diff < 600000 && (!best || v._ts >= best._ts)) best = v;
+    }
+    return best;
+  }
   function ensure(time, model) {
     const k = getKey(time, model);
     if (!map.has(k)) {
@@ -75,6 +87,32 @@ function parseRequests() {
   for (let i = 0; i < lines.length; i++) {
     const L = lines[i];
     let m;
+
+    /* 无浏览器：WAA 签名 */
+    m = L.match(signRe);
+    if (m) {
+      const r = latestOpen(Date.parse(m[1].replace(' ','T')+'Z') || 0);
+      if (r) {
+        r.engine = '无浏览器';
+        r.account = 'u/' + m[3];
+        r.sign = (m[2] === '成功' ? '✓' : '✗') + (m[4] ? ' ' + m[4] : '') + (m[5] ? ' ' + Math.round(parseFloat(m[5])) + 'ms' : '');
+        if (m[2] === '失败') { r.type = 'err'; r.resultText = '❌ 签名失败'; if (m[6]) r.detail = m[6].trim(); }
+      }
+      continue;
+    }
+    /* 无浏览器：直连 Google 的 HTTP 状态 */
+    m = L.match(directRe);
+    if (m) {
+      const r = latestOpen(Date.parse(m[1].replace(' ','T')+'Z') || 0);
+      if (r) {
+        r.engine = '无浏览器';
+        r.account = 'u/' + m[2];
+        r.status = parseInt(m[3]);
+        if (r.status >= 400) r.type = 'err';
+      }
+      continue;
+    }
+    if (engineRe.test(L)) continue;
 
     /* 收到请求 */
     m = L.match(reqRe);
