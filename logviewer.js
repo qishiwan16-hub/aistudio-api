@@ -299,6 +299,60 @@ function parseEngine() {
   return st;
 }
 
+/* ── pg-bridge 面板（只读预览）：数据来自 data/accounts + 日志里的签名记录 ── */
+const TIER_HDR = { Pro: 'TIER1', Ultra: 'TIER2', Ultra_20X: 'TIER2', Plus: 'TIER0', Free: 'TIER0' };
+function waaStatus() {
+  const accDir = path.join(BASE, 'data', 'accounts');
+  let reg = {};
+  try { reg = JSON.parse(fs.readFileSync(path.join(accDir, 'registry.json'), 'utf8')).accounts || {}; } catch(e) {}
+  /* 日志：按 auth_user 统计签名次数和最近一次 poolState */
+  const sign = {};
+  try {
+    const re = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*WAA 签名成功:.*?auth_user=(\d+).*?poolState=(\w+)/;
+    for (const L of fs.readFileSync(LOG_FILES.main, 'utf8').split('\n')) {
+      const m = L.match(re);
+      if (!m) continue;
+      const s = sign[m[2]] || (sign[m[2]] = { mints: 0 });
+      s.mints++; s.state = m[3]; s.ts = Date.parse(m[1].replace(' ', 'T') + '+08:00') || 0;
+    }
+  } catch(e) {}
+  const accounts = Object.values(reg).map(a => {
+    let names = [];
+    try {
+      const c = JSON.parse(fs.readFileSync(path.join(accDir, a.id, 'auth.json'), 'utf8')).cookies || [];
+      names = Array.isArray(c) ? c.map(x => x.name) : Object.keys(c);
+    } catch(e) {}
+    const s = sign[String(a.auth_user || '0')];
+    const pool = s && s.ts && Date.now() - s.ts < 3600000
+      ? { state: s.state === 'cold' ? 'hot' : s.state, mints: s.mints, expiresAt: s.ts + 3600000 } : null;
+    return {
+      accountId: a.id + (a.enabled === false ? ' (停用)' : ''),
+      g1Tier: TIER_HDR[a.tier] || 'TIER0',
+      authUser: Number(a.auth_user || 0),
+      cookieCount: names.length,
+      cookieNames: names,
+      requestsCount: s ? s.mints : 0,
+      topModels: [],
+      pool,
+    };
+  });
+  return { ok: true, accountCount: accounts.length, accounts,
+           cookiesDir: accDir, cookieFiles: accounts.length };
+}
+function waaPage() {
+  delete require.cache[require.resolve('./waa-ui/dashboard.js')];
+  const { renderDashboardHtml } = require('./waa-ui/dashboard.js');
+  let html = renderDashboardHtml({ apiKey: '（见 aistudio-api 配置）', defaultModel: 'gemini-3.8-flash' });
+  const shim = '<style>.import-bar,#manual-cookie,button.danger,button[onclick^="testAcc"]{display:none!important}</style>'
+    + '<script>(function(){var f=window.fetch;window.fetch=function(u,o){'
+    + 'if(u==="/api/status")u="/api/waa-status";'
+    + 'if(/^\\/api\\/(accounts|login|logout)/.test(u))return Promise.resolve(new Response(JSON.stringify({ok:false,error:"只读预览"}),{status:200,headers:{"Content-Type":"application/json"}}));'
+    + 'return f(u,o)}})();</script>';
+  html = html.replace('<script>', shim + '<script>');
+  html = html.replace(/(<div class="brand-title">)WAA \/\/ RELAY GATEWAY/, '$1WAA // 无浏览器模式（只读预览）');
+  return html;
+}
+
 const server = http.createServer((req, res) => {
   const parsed = url.parse(req.url, true);
   const pn = parsed.pathname;
@@ -323,6 +377,18 @@ const server = http.createServer((req, res) => {
     const data = parseRequests();
     res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
     res.end(JSON.stringify(data));
+    return;
+  }
+
+  /* pg-bridge 面板只读预览 */
+  if (pn === '/waa') {
+    try { res.writeHead(200, {'Content-Type':'text/html; charset=utf-8'}); res.end(waaPage()); }
+    catch(e) { res.writeHead(500, {'Content-Type':'text/plain; charset=utf-8'}); res.end('面板加载失败: ' + e.message); }
+    return;
+  }
+  if (pn === '/api/waa-status') {
+    res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
+    res.end(JSON.stringify(waaStatus()));
     return;
   }
 
