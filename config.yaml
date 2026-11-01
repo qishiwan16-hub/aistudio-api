@@ -8,7 +8,7 @@ logging:
   level: INFO
   # 是否转储每次 API 请求与响应的完整报文详情 (支持通过环境变量 DEBUG=true 触发)
   dump_requests: false
-  # 是否将请求与响应转储落盘为独立文件 (支持环境变量 AISTUDIO_DUMP_FILE=true 触发)
+  # 是否将请求与响应转储持久化保存为独立文件 (支持环境变量 AISTUDIO_DUMP_FILE=true 触发)
   dump_to_file: false
   # 转储文件保存目录 (默认为项目根目录下 dumps/)
   dump_dir: dumps
@@ -30,7 +30,7 @@ rotator:
     rate_limited_short: 60           # 偶发 429 临时避让冷却 (秒)
     rate_limited_drip: 300           # 滴灌隔离冷却 (秒)
     rate_limited_drip_extended: 600  # 多次滴灌隔离冷却 (秒)
-    auth_error: 300                  # 遇到 403 权限拒绝临时隔离 (秒)
+    # 403 认证异常采用动态软惩罚机制 (auth_errors 加权 +200)，不加硬冷却锁，允许标签页自愈重试
 
 # 付费模型准入与主动抢切规则 (彻底解耦硬编码关键词)
 paid_model_rules:

@@ -37,7 +37,7 @@ def _ensure_net_trace(page: CDPPage) -> None:
     if getattr(page, "has_net_trace", False):
         return
     page.has_net_trace = True
-
+    logger.debug("已为页面注册 $rpc/ 网络跟踪监听器")
     def on_request(data: dict[str, object]) -> None:
         url = str(data.get("url") or "")
         rid = str(data.get("request_id") or "")
@@ -80,7 +80,7 @@ def _log_rpc_net_evidence(page: CDPPage, where: str) -> None:
     failures = getattr(page, "rpc_net_failures", None) or []
     if not failures:
         logger.warning(
-            "页面 fetch 传输失败 (%s)：无 Network.loadingFailed 记录（页面 JS 层中止或监听晚于请求）",
+            "请求传输失败: 场景=%s, 未捕获到网络层失败事件",
             where,
         )
         return
@@ -96,11 +96,10 @@ def _log_rpc_net_evidence(page: CDPPage, where: str) -> None:
             f"age={age:.1f}s"
         )
     logger.warning(
-        "页面 fetch 传输失败 (%s)：CDP 网络层证据 %s",
+        "请求传输失败: 场景=%s, 网络层事件: %s",
         where,
         " | ".join(parts),
     )
-
 
 def _transport_error(page: CDPPage, message: str) -> BrowserTransportError:
     exc = BrowserTransportError(message)
@@ -251,12 +250,11 @@ class XHRStreamTransport:
                             q.put_nowait(data)
                         except asyncio.QueueFull:
                             logger.warning(
-                                "流式反压: 队列已满 (rid=%s)",
+                                "流式队列积压已满: rid=%s",
                                 rid,
                             )
             except Exception as e:
-                logger.debug("分发流式推送数据失败: %s", e)
-
+                logger.debug("处理流式推送数据失败: %s", e)
         if hasattr(page, "on_binding"):
             page.on_binding("__aistudio_stream_push__", on_stream_push)
         elif hasattr(page, "cdp") and hasattr(page.cdp, "on"):
@@ -274,30 +272,41 @@ class XHRStreamTransport:
         url: str,
         headers: dict[str, str],
         body: str,
-        timeout_ms: int,
         auth_user: str = "0",
         tier: str | None = None,
     ) -> tuple[int, bytes]:
         """Replay request via XHR inside the browser page context."""
-        timeout_s = timeout_ms / 1000
+        t0 = time.perf_counter()
         clean_headers = await _ensure_authorization_header(
             page, headers, auth_user=auth_user, tier=tier
         )
         _ensure_net_trace(page)
+        logger.debug(
+            "发送非流式 XHR: url=%s, 请求体长度=%d, auth_user=%s",
+            url,
+            len(body),
+            auth_user,
+        )
         args = build_hooked_request_args(
             url=url,
             headers=clean_headers,
             body=body,
-            timeout_s=timeout_s,
         )
 
-        result = await page.evaluate(HOOKED_REQUEST_JS, args, timeout_s=timeout_s + 5.0)
+        result = await page.evaluate(HOOKED_REQUEST_JS, args, timeout_s=None)
         res_dict: dict[str, object] = result if isinstance(result, dict) else {}
         status = int(str(res_dict.get("status") or 0))
         raw_text = str(res_dict.get("body") or "")
+        elapsed_ms = (time.perf_counter() - t0) * 1000
         if status == 0:
             _log_rpc_net_evidence(page, "replay")
             raise _transport_error(page, f"replay failed: {raw_text}")
+        logger.debug(
+            "非流式 XHR 响应完成: status=%d, 耗时=%.1fms, 响应长度=%d",
+            status,
+            elapsed_ms,
+            len(raw_text),
+        )
         return status, raw_text.encode("utf-8")
 
     async def send_streaming_request(
@@ -307,7 +316,6 @@ class XHRStreamTransport:
         url: str,
         headers: dict[str, str],
         body: str,
-        timeout_ms: int,
         auth_user: str = "0",
         tier: str | None = None,
     ) -> AsyncGenerator[tuple[str, object], None]:
@@ -315,12 +323,18 @@ class XHRStreamTransport:
 
         Guarantees V8 window cleanup on termination/timeout and prevents silent truncation.
         """
-        timeout_s = timeout_ms / 1000
+        t0 = time.perf_counter()
         clean_headers = await _ensure_authorization_header(
             page, headers, auth_user=auth_user, tier=tier
         )
         _ensure_net_trace(page)
         rid = uuid.uuid4().hex[:8]
+        logger.debug(
+            "开始流式 XHR 传输: rid=%s, url=%s, auth_user=%s",
+            rid,
+            url,
+            auth_user,
+        )
 
         # Ensure native binding on page and register local async queue
         if not getattr(page, "has_stream_binding", False):
@@ -340,27 +354,20 @@ class XHRStreamTransport:
             url=url,
             headers=clean_headers,
             body=body,
-            timeout_s=timeout_s,
             rid=rid,
         )
         await page.evaluate(STREAMING_INIT_JS, init_args)
 
-        deadline = asyncio.get_running_loop().time() + timeout_s
         status_sent = False
         is_terminal = False
-
+        chunk_count = 0
+        total_bytes = 0
         try:
             while not is_terminal:
                 if page.is_closed() is True:
                     raise BrowserTransportError("Browser page closed during streaming")
-                now = asyncio.get_running_loop().time()
-                remaining = deadline - now
-                if remaining <= 0:
-                    break
-
-                step_timeout = min(remaining, 1.0)
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=step_timeout)
+                    event = await asyncio.wait_for(queue.get(), timeout=1.0)
                 except TimeoutError:
                     if page.is_closed() is True:
                         raise BrowserTransportError(
@@ -372,12 +379,13 @@ class XHRStreamTransport:
                     status = int(str(event.get("status") or 0))
                     yield ("status", status)
                     status_sent = True
-                    deadline = asyncio.get_running_loop().time() + timeout_s
                 elif etype == "chunk":
                     text = str(event.get("text") or "")
                     if text:
-                        yield ("chunk", text.encode("utf-8"))
-                        deadline = asyncio.get_running_loop().time() + timeout_s
+                        chunk_count += 1
+                        chunk_bytes = text.encode("utf-8")
+                        total_bytes += len(chunk_bytes)
+                        yield ("chunk", chunk_bytes)
                 elif etype == "error":
                     message = str(event.get("message") or "unknown error")
                     _log_rpc_net_evidence(page, "streaming")
@@ -389,18 +397,27 @@ class XHRStreamTransport:
                             if str(remaining_event.get("type") or "") == "chunk":
                                 r_text = str(remaining_event.get("text") or "")
                                 if r_text:
-                                    yield ("chunk", r_text.encode("utf-8"))
+                                    chunk_count += 1
+                                    chunk_bytes = r_text.encode("utf-8")
+                                    total_bytes += len(chunk_bytes)
+                                    yield ("chunk", chunk_bytes)
                         except asyncio.QueueEmpty:
                             break
                     is_terminal = True
+                    elapsed_ms = (time.perf_counter() - t0) * 1000
+                    logger.debug(
+                        "流式 XHR 传输结束: rid=%s, 分块数=%d, 总字节数=%d, 耗时=%.1fms",
+                        rid,
+                        chunk_count,
+                        total_bytes,
+                        elapsed_ms,
+                    )
                     break
             if not status_sent:
                 _log_rpc_net_evidence(page, "streaming-no-status")
                 raise _transport_error(
                     page, "streaming request timeout: no response status"
                 )
-            if not is_terminal:
-                raise TimeoutError("streaming response timed out before completion")
         finally:
             self._queues.pop(rid, None)
             if not page.is_closed():

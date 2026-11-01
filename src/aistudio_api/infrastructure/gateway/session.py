@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
@@ -18,9 +19,9 @@ from aistudio_api.infrastructure.browser.cdp_client import CDPClient, CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
     DOM_GC_CLEANUP_JS,
     SNAPSHOT_GENERATE_JS,
+    build_snapshot_args,
 )
 from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
-    BOTGUARD_BOOTSTRAP_PROMPT,
     bootstrap_botguard_and_template,
 )
 from aistudio_api.infrastructure.gateway.session_auth import (
@@ -114,6 +115,7 @@ class BrowserSession:
 
     def set_ready_context(self, context: SessionContext) -> None:
         """Set active ready context (used by transitions and test fixtures)."""
+        self._auth_file = context.auth_file
         self._gate.set_ready(context)
 
     def get_current_auth_user(self) -> str:
@@ -141,7 +143,7 @@ class BrowserSession:
         finally:
             self._in_flight = max(0, self._in_flight - 1)
 
-    async def ensure_ready(self, timeout_s: float = 120.0) -> SessionContext:
+    async def ensure_ready(self) -> SessionContext:
         """Wait until session is 100% READY."""
         if self._gate.is_ready() and self._gate.active_context is not None:
             return self._gate.active_context
@@ -149,7 +151,7 @@ class BrowserSession:
         if self._gate.state == SessionState.UNINITIALIZED:
             await self.transition_to_account(self._auth_file, force_refresh=False)
 
-        return await self._gate.wait_ready(timeout_s=timeout_s)
+        return await self._gate.wait_ready()
 
     async def ensure_context(self) -> CDPPage:
         """Ensure active verified CDPPage is available, auto-reconnecting if dropped."""
@@ -293,6 +295,15 @@ class BrowserSession:
         self, auth_file: str | None, force_refresh: bool = False
     ) -> SessionContext:
         """Execute atomic session transition to target auth file."""
+        if (
+            not force_refresh
+            and self._gate.is_ready()
+            and self._gate.active_context is not None
+            and self._gate.active_context.auth_file == auth_file
+        ):
+            return self._gate.active_context
+
+        self._gate.set_preparing()
         async with self._transition_lock:
             if (
                 not force_refresh
@@ -343,8 +354,11 @@ class BrowserSession:
                     is_proc_alive_cb=lambda: (
                         self._proc is None or self._proc.is_alive()
                     ),
+                    auth_user=target_auth_user,
                 )
 
+                new_page._cached_cookies = None
+                await save_browser_cookies(new_page, auth_file)
                 target_tier = get_tier_from_meta(auth_file)
                 self._tier = target_tier
                 new_context = SessionContext(
@@ -373,7 +387,7 @@ class BrowserSession:
                     drain_task.add_done_callback(self._background_tasks.discard)
                 self._gate.set_ready(new_context)
                 log.info(
-                    "会话切换完成: auth_file=%s, u/%s (活跃在途=%d)",
+                    "会话切换成功: 文件=%s, auth_user=%s, 在途请求数=%d",
                     auth_file,
                     target_auth_user,
                     self._in_flight,
@@ -415,7 +429,8 @@ class BrowserSession:
                     context.drain_event.wait(), timeout=min(remaining, 2.0)
                 )
                 break
-
+            with suppress(TimeoutError):
+                await asyncio.wait_for(context.drain_event.wait(), timeout=5.0)
         with suppress(Exception):
             if context in self._retiring_contexts:
                 self._retiring_contexts.remove(context)
@@ -441,12 +456,16 @@ class BrowserSession:
             )
         return (await self.ensure_ready()).page
 
-    async def capture_template(self, model: str) -> dict[str, object]:
+    async def capture_template(
+        self, model: str, ctx: SessionContext | None = None
+    ) -> dict[str, object]:
         if self._proc is not None and not self._proc.is_alive():
             raise RuntimeError("Browser process died during template capture")
 
-        ctx = self.active_context
-        base = dict(ctx.base_template if ctx else DEFAULT_BOOTSTRAP_TEMPLATE)
+        active_ctx = ctx or self.active_context
+        base = dict(
+            active_ctx.base_template if active_ctx else DEFAULT_BOOTSTRAP_TEMPLATE
+        )
         normalized_model = model if model.startswith("models/") else f"models/{model}"
         try:
             body_val = base.get("body")
@@ -463,11 +482,19 @@ class BrowserSession:
                     body_list[0] = normalized_model
                     base["body"] = json.dumps(body_list, separators=(",", ":"))
         except Exception as e:
-            log.debug("Failed to adapt model into base template body: %s", e)
+            log.debug("适配模型名称至模板失败: %s", e)
         return base
 
-    async def generate_snapshot(self, contents: list[AistudioContent]) -> str:
-        ctx = await self.ensure_ready()
+    async def generate_snapshot(
+        self,
+        contents: list[AistudioContent],
+        ctx: SessionContext | None = None,
+    ) -> str:
+        active_ctx = ctx or await self.ensure_ready()
+        # 严格遵守 Google AI Studio 前端 JS 逆向逻辑 (见 live_m=_b.js: _.gD / _.jn / _.VC):
+        # 1. 仅提取 contents (字段 2)，绝不包含 system_instruction
+        # 2. 遍历每个 Part: 文本 -> getText(), 内联图片 -> getData().Fe(), 文件 -> getId(), 其余 -> ""
+        # 3. 数组所有元素以单空格 " " 拼接后计算 sha256(utf-8).hexdigest()
         hash_parts: list[str] = []
         for content in contents:
             for part in content.parts:
@@ -479,20 +506,28 @@ class BrowserSession:
                     hash_parts.append(str(part.file_id))
                 else:
                     hash_parts.append("")
-        content_hash = sha256(" ".join(hash_parts).encode("utf-8")).hexdigest()
-
+        prompt = " ".join(hash_parts)
+        content_hash = sha256(prompt.encode("utf-8")).hexdigest()
+        log.debug("开始计算内容快照: hash=%s, prompt_len=%d", content_hash[:8], len(prompt))
         async with self._snapshot_lock:
+            args = build_snapshot_args(prompt=prompt, content_hash=content_hash)
             for attempt in range(3):
                 try:
-                    snapshot = await ctx.page.evaluate(
-                        SNAPSHOT_GENERATE_JS, args=content_hash, timeout_s=25.0
+                    raw_res = await active_ctx.page.evaluate(
+                        SNAPSHOT_GENERATE_JS, args=args, timeout_s=25.0
                     )
-                    if snapshot and isinstance(snapshot, str) and len(snapshot) > 0:
+                    snapshot = ""
+                    if isinstance(raw_res, dict):
+                        snapshot = str(raw_res.get("snapshot") or "")
+                    elif isinstance(raw_res, str):
+                        snapshot = raw_res
+                    if snapshot:
+                        log.debug("内容快照计算完成: hash=%s, 长度=%d", content_hash[:8], len(snapshot))
                         return snapshot
                 except Exception as e:
-                    log.debug("快照计算第 %d 次尝试失败: %s", attempt + 1, e)
-                    if attempt < 2:
-                        await ctx.page.wait_for_timeout(100)
+                    log.debug("计算内容快照失败: 尝试=%d, 错误=%s", attempt + 1, e)
+                if attempt < 2:
+                    await active_ctx.page.wait_for_timeout(300)
 
         raise RuntimeError(
             f"Snapshot generation failed for content hash {content_hash[:8]}"
@@ -502,11 +537,11 @@ class BrowserSession:
         self,
         *,
         body: str,
-        timeout_ms: int,
         url: str | None = None,
         headers: dict[str, str] | None = None,
+        ctx: object | None = None,
     ) -> tuple[int, bytes]:
-        ctx = await self.ensure_ready()
+        ctx = ctx if isinstance(ctx, SessionContext) else await self.ensure_ready()
         captured_url = url or str(ctx.base_template.get("url") or "")
         hdrs_val = ctx.base_template.get("headers")
         captured_headers = headers or (
@@ -521,7 +556,6 @@ class BrowserSession:
                 url=captured_url,
                 headers=captured_headers,
                 body=body,
-                timeout_ms=timeout_ms,
                 auth_user=ctx.auth_user,
                 tier=ctx.tier,
             )
@@ -532,11 +566,11 @@ class BrowserSession:
         self,
         *,
         body: str,
-        timeout_ms: int,
         url: str | None = None,
         headers: dict[str, str] | None = None,
+        ctx: object | None = None,
     ) -> AsyncGenerator[tuple[str, object], None]:
-        ctx = await self.ensure_ready()
+        ctx = ctx if isinstance(ctx, SessionContext) else await self.ensure_ready()
         captured_url = url or str(ctx.base_template.get("url") or "")
         hdrs_val = ctx.base_template.get("headers")
         captured_headers = headers or (
@@ -551,7 +585,6 @@ class BrowserSession:
                 url=captured_url,
                 headers=captured_headers,
                 body=body,
-                timeout_ms=timeout_ms,
                 auth_user=ctx.auth_user,
                 tier=ctx.tier,
             ):
@@ -568,15 +601,13 @@ class BrowserSession:
         if (
             target_page is not None
             and not target_page.is_closed()
-            and (self._in_flight <= 0 or (self._stream_cleanup_count % 5 == 0))
+            and self._in_flight <= 0
         ):
             with suppress(Exception):
                 await target_page.evaluate(DOM_GC_CLEANUP_JS)
-            if self._in_flight <= 0 and (self._stream_cleanup_count % 10 == 0):
+            if self._stream_cleanup_count % 10 == 0:
                 with suppress(Exception):
                     await target_page.collect_garbage()
-                import gc
-
                 gc.collect()
 
     async def import_cookies(
@@ -685,7 +716,6 @@ class BrowserSession:
 
 
 __all__ = [
-    "BOTGUARD_BOOTSTRAP_PROMPT",
     "DEFAULT_BOOTSTRAP_TEMPLATE",
     "BrowserSession",
     "_is_aistudio_page_url",

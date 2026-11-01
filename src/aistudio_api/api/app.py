@@ -67,10 +67,24 @@ async def lifespan(_app: FastAPI):
     rotator = init_rotator(account_store)
     runtime_state.rotator = rotator
 
+    for a in account_store.list_accounts():
+        st = rotator.get_account_stats(a.id)
+        if st is not None and not st.session_expired and st.auth_cooldown > 0:
+            st.auth_cooldown = 0.0
+    active_auth_path = account_store.get_active_auth_path()
+    if active_auth_path is not None and client.session is not None:
+        client.session._auth_file = str(active_auth_path)
     logger.info(
-        "Client initialized (port=%s, accounts=%d)",
+        "服务初始化完成: 监听浏览器调试端口=%d, 已加载账号数=%d",
         runtime_state.browser_port,
         len(account_store.list_accounts()),
+    )
+    logger.debug(
+        "账号初始状态: %s",
+        [
+            f"{a.id}(u/{a.auth_user},tier={a.tier},enabled={a.enabled})"
+            for a in account_store.list_accounts()
+        ],
     )
 
     # 后台预热浏览器，避免首次请求延迟
@@ -79,7 +93,9 @@ async def lifespan(_app: FastAPI):
     async def _warmup():
         for attempt in range(3):
             try:
+                logger.debug("开始预热浏览器后端: attempt=%d", attempt + 1)
                 await client.warmup()
+                logger.debug("浏览器预热就绪: attempt=%d", attempt + 1)
                 return
             except Exception as e:
                 if attempt < 2:
@@ -99,39 +115,68 @@ async def lifespan(_app: FastAPI):
             probe_account_email,
         )
 
-        for a in account_store.list_accounts():
-            if not a.email or a.tier == "Free":
-                apath = account_store.get_auth_path(a.id)
-                if apath and apath.is_file():
-                    try:
-                        adata = json.loads(apath.read_text(encoding="utf-8"))
-                        rcookies = adata.get("cookies") or []
-                        cdict = {
-                            str(c.get("name") or ""): str(c.get("value") or "")
-                            for c in rcookies
-                            if isinstance(c, dict) and c.get("name")
-                        }
-                        if cdict:
-                            if not a.email:
-                                em = await probe_account_email(
-                                    cdict, auth_user=a.auth_user or "0"
-                                )
-                                if em:
-                                    account_store.update_account_email(a.id, em)
-                            if a.tier == "Free":
-                                t = await probe_account_benefit_tier(
-                                    cdict, auth_user=a.auth_user or "0"
-                                )
-                                if t and t != "Free":
-                                    account_store.update_account_tier(a.id, t)
-                                    logger.info(
-                                        "启动自动校验并升级账号 %s (u/%s) 订阅等级: %s",
-                                        a.id,
-                                        a.auth_user,
-                                        t,
-                                    )
-                    except Exception:
-                        pass
+        now_ts = time.time()
+        accounts_to_check = [
+            a
+            for a in account_store.list_accounts()
+            if not a.email
+            or (a.tier_checked_at is None)
+            or (now_ts - (a.tier_checked_at or 0) > 86400 * 3)
+        ]
+        if not accounts_to_check:
+            logger.debug("所有账号邮箱与订阅等级最近均已校验，跳过启动探测")
+            return
+
+        logger.info(
+            "开始自动校验账号订阅等级与邮箱 (共 %d 个账号待检测)...",
+            len(accounts_to_check),
+        )
+        upgraded_count = 0
+        checked_count = 0
+
+        for a in accounts_to_check:
+            apath = account_store.get_auth_path(a.id)
+            if apath and apath.is_file():
+                try:
+                    adata = json.loads(apath.read_text(encoding="utf-8"))
+                    rcookies = adata.get("cookies") or []
+                    cdict = {
+                        str(c.get("name") or ""): str(c.get("value") or "")
+                        for c in rcookies
+                        if isinstance(c, dict) and c.get("name")
+                    }
+                    if cdict:
+                        checked_count += 1
+                        if not a.email:
+                            em = await probe_account_email(
+                                cdict, auth_user=a.auth_user or "0"
+                            )
+                            if em:
+                                account_store.update_account_email(a.id, em)
+                        t = await probe_account_benefit_tier(
+                            cdict, auth_user=a.auth_user or "0"
+                        )
+                        resolved_tier = t or "Free"
+                        account_store.update_account_tier(
+                            a.id, resolved_tier, checked_at=now_ts
+                        )
+                        if resolved_tier != "Free" and a.tier == "Free":
+                            upgraded_count += 1
+                            logger.info(
+                                "账号订阅等级自动升级: id=%s (u/%s) -> %s",
+                                a.id,
+                                a.auth_user,
+                                resolved_tier,
+                            )
+                except Exception as e:
+                    logger.debug("账号 %s 订阅检测异常: %s", a.id, e)
+
+        logger.info(
+            "账号订阅校验完成: 检测=%d 个, 发现付费订阅=%d 个",
+            checked_count,
+            upgraded_count,
+        )
+
     tier_task = asyncio.create_task(_auto_refresh_tiers())
 
     yield
@@ -153,7 +198,9 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="AI Studio API", lifespan=lifespan)
 app.include_router(system_public_router)
 app.include_router(system_protected_router, dependencies=[Depends(require_web_auth)])
-app.include_router(accounts_router, prefix="/api", dependencies=[Depends(require_web_auth)])
+app.include_router(
+    accounts_router, prefix="/api", dependencies=[Depends(require_web_auth)]
+)
 app.include_router(accounts_router, dependencies=[Depends(require_web_auth)])
 app.include_router(gemini_router, dependencies=[Depends(require_api_key)])
 app.include_router(models_router, dependencies=[Depends(require_api_key)])
@@ -163,6 +210,27 @@ app.include_router(openai_router, dependencies=[Depends(require_api_key)])
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
     code, msg, status_str = classify_gemini_error_payload(exc)
+    if code >= 500:
+        logger.error(
+            "HTTP 异常: status=%d, message=%s, path=%s",
+            code,
+            msg,
+            _request.url.path,
+        )
+    elif code in (401, 403, 429):
+        logger.warning(
+            "HTTP 权限/限额异常: status=%d, message=%s, path=%s",
+            code,
+            msg,
+            _request.url.path,
+        )
+    else:
+        logger.info(
+            "HTTP 业务异常: status=%d, message=%s, path=%s",
+            code,
+            msg,
+            _request.url.path,
+        )
     return JSONResponse(
         status_code=code,
         content={
@@ -181,6 +249,7 @@ async def validation_exception_handler(
     _request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     code, msg, status_str = 400, str(exc), "INVALID_ARGUMENT"
+    logger.warning("请求参数校验失败: path=%s, error=%s", _request.url.path, exc)
     return JSONResponse(
         status_code=code,
         content={
@@ -212,7 +281,9 @@ async def logging_and_dump_middleware(request, call_next):
     if dump_enabled:
         req_id = f"req_{secrets.token_hex(4)}"
         client_str = (
-            f"{request.client.host}:{request.client.port}" if request.client else "unknown"
+            f"{request.client.host}:{request.client.port}"
+            if request.client
+            else "unknown"
         )
         headers_dict = dict(request.headers)
         query_dict = dict(request.query_params)
@@ -344,7 +415,9 @@ async def spa_navigation_middleware(request: Request, call_next):
     if is_html_nav and (is_accounts_spa or not is_api) and index_html_path.is_file():
         response = FileResponse(index_html_path)
         response.headers["Vary"] = "Accept"
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, max-age=0"
+        )
         return response
 
     response = await call_next(request)
@@ -356,7 +429,9 @@ async def spa_navigation_middleware(request: Request, call_next):
                 response.headers["Vary"] = f"{existing_vary}, Accept"
         else:
             response.headers["Vary"] = "Accept"
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, max-age=0"
+        )
 
     return response
 
@@ -367,7 +442,9 @@ async def root_index():
     if index_html_path.is_file():
         response = FileResponse(index_html_path)
         response.headers["Vary"] = "Accept"
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, max-age=0"
+        )
         return response
     return JSONResponse({"message": "AI Studio API Web UI"})
 
@@ -384,5 +461,5 @@ def main():
 
     import uvicorn
 
-    logger.info("正在启动服务，监听端口 %s", args.port)
+    logger.info("启动服务: 监听端口=%d, 浏览器调试端口=%d", args.port, runtime_state.browser_port)
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")

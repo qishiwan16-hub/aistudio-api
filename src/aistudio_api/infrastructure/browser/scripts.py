@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import base64
-import gzip
 import json
 from pathlib import Path
 
 _JS_DIR = Path(__file__).resolve().parent / "js"
-_GZIP_MIN_BYTES = 96 * 1024
 
 
 def _load_js(filename: str) -> str:
@@ -21,53 +18,46 @@ STREAMING_INIT_JS = _load_js("streaming_init.js")
 STREAM_CLEANUP_JS = _load_js("stream_cleanup.js")
 HOOKED_REQUEST_JS = _load_js("hooked_request.js")
 SNAPSHOT_GENERATE_JS = _load_js("snapshot_generate.js")
-CHECK_IDENTITY_JS = _load_js("check_identity.js")
 STOP_GENERATION_JS = _load_js("stop_generation.js")
+SNAPSHOT_PROBE_JS = _load_js("snapshot_probe.js")
+CHECK_IDENTITY_JS = _load_js("check_identity.js")
 DOM_GC_CLEANUP_JS = _load_js("dom_gc_cleanup.js")
 EXTRACT_EMAIL_JS = _load_js("extract_email.js")
 
 
+def build_snapshot_args(*, prompt: str, content_hash: str) -> dict[str, str]:
+    return {
+        "prompt": prompt,
+        "hash": content_hash,
+    }
+
+
+def build_snapshot_probe_args(*, content_hash: str, timeout_ms: int = 12000) -> dict[str, object]:
+    return {
+        "hash": content_hash,
+        "timeoutMs": timeout_ms,
+    }
+
+
 def build_streaming_init_args(
-    *, url: str, headers: dict[str, str], body: str, timeout_s: float, rid: str
+    *, url: str, headers: dict[str, str], body: str, rid: str
 ) -> dict[str, object]:
     """Prepare argument object for STREAMING_INIT_JS evaluation."""
     return {
-        **build_hooked_request_args(
-            url=url, headers=headers, body=body, timeout_s=timeout_s
-        ),
+        **build_hooked_request_args(url=url, headers=headers, body=body),
         "rid": rid,
     }
 
 
 def build_hooked_request_args(
-    *, url: str, headers: dict[str, str], body: str, timeout_s: float
+    *, url: str, headers: dict[str, str], body: str
 ) -> dict[str, object]:
     """Prepare argument object for HOOKED_REQUEST_JS evaluation."""
     args: dict[str, object] = {
         "url": url,
         "headers": headers,
         "body": body,
-        "timeout": timeout_s,
     }
-    if any(
-        key.lower() == "content-encoding" and value.lower() != "identity"
-        for key, value in headers.items()
-    ):
-        return args
-    raw = body.encode("utf-8")
-    if len(raw) >= _GZIP_MIN_BYTES:
-        args["body"] = base64.b64encode(gzip.compress(raw, compresslevel=6)).decode(
-            "ascii"
-        )
-        args["headers"] = {
-            **{
-                key: value
-                for key, value in headers.items()
-                if key.lower() != "content-encoding"
-            },
-            "Content-Encoding": "gzip",
-        }
-        args["gzip"] = True
     return args
 
 

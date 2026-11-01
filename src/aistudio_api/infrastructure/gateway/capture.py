@@ -36,6 +36,7 @@ class CapturedRequest:
     model: str = ""
     snapshot: str = ""
     prefill_text: str = ""
+    ctx: object | None = None
 
 
 class RequestCaptureService:
@@ -50,7 +51,7 @@ class RequestCaptureService:
     def clear_templates(self) -> None:
         """清空捕获的请求模板（账号切换或强制刷新时调用）。"""
         self._templates.clear()
-        logger.info("已清空捕获模板缓存")
+        logger.info("已清空请求模板缓存")
 
     async def capture(
         self,
@@ -73,7 +74,8 @@ class RequestCaptureService:
     ) -> CapturedRequest | None:
         if force_refresh:
             self._templates.pop(model, None)
-        template = await self._ensure_template(model)
+        ctx = await self._session.ensure_ready()
+        template = await self._ensure_template(model, ctx=ctx)
         rewritten_contents = contents
 
         # 预填充兼容：酒馆以 assistant 结尾会被 Gemini 400 拒绝，
@@ -124,20 +126,29 @@ class RequestCaptureService:
             headers=dict(template.headers),
             body=body,
             model=model,
+            ctx=ctx,
             snapshot=snapshot,
             prefill_text=prefill_text,
         )
         logger.info(
-            "Hook 拦截成功: model=%s, snapshot=%s chars, body=%s chars",
+            "捕获请求模板成功: model=%s, 快照长度=%d, 请求体长度=%d",
             captured.model,
             len(captured.snapshot),
             len(captured.body),
         )
         return captured
 
-    async def _ensure_template(self, model: str) -> CapturedRequest:
-        ctx = await self._session.ensure_ready()
-        ctx_id = ctx.context_id
+    async def _ensure_template(
+        self, model: str, ctx: object | None = None
+    ) -> CapturedRequest:
+        from aistudio_api.infrastructure.gateway.session_state import SessionContext
+
+        active_ctx = (
+            ctx
+            if isinstance(ctx, SessionContext)
+            else await self._session.ensure_ready()
+        )
+        ctx_id = active_ctx.context_id
         if self._active_ctx_id != ctx_id:
             self._templates.clear()
             self._active_ctx_id = ctx_id
@@ -195,5 +206,5 @@ class RequestCaptureService:
                 model=model,
             )
             self._templates[model] = template
-            logger.info("Hook 模板已就绪并缓存: model=%s", model)
+            logger.info("请求模板已就绪并缓存: model=%s", model)
             return template

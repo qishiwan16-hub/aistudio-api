@@ -138,6 +138,7 @@ async def test_account_stats_pacific_midnight_reset():
     assert stats.is_available("gemini-2.5-pro")
     assert stats.daily_date_la != "2020-01-01"
 
+
 @pytest.mark.asyncio
 async def test_account_stats_clear_cooldown_resets_counter():
     """测试手动清除冷却会重置 429 次数计数器，不会在下一次 429 时直接秒锁至午夜。"""
@@ -159,6 +160,7 @@ async def test_account_stats_clear_cooldown_resets_counter():
     stats.record_rate_limited(model="gemini-2.5-pro")
     rem = stats.get_cooldown_remaining("gemini-2.5-pro")
     assert 0 < rem <= 60.0
+
 
 @pytest.mark.asyncio
 async def test_rotator_sticky_mode():
@@ -239,7 +241,7 @@ async def test_rotator_auth_error_failover():
     assert next_acc is not None
     assert next_acc.id == "acc_2"
 
-    # 新进请求（未指定 failed_account_id）也应该自动规避仍在 auth_cooldown 的 acc_1，直接选择 acc_2
+    # 新进请求（未指定 failed_account_id）也因 acc_1 具有 auth_errors 惩罚分 (+200) 而自动优先选择健康的 acc_2
     new_req_acc = await rotator.get_next_account(
         model="gemini-3.8-flash",
         current_account_id=None,
@@ -469,7 +471,6 @@ async def test_browser_session_send_streaming_batch_events():
         url="https://example.com",
         headers={},
         body="[]",
-        timeout_ms=5000,
     ):
         results.append((tag, data))
 
@@ -601,7 +602,7 @@ async def test_try_switch_account_concurrent_403_avalanche_and_in_place_recovery
         # 3 个并发协程同时遇到 403 并尝试切号/自愈
         tasks = [
             try_switch_account(
-                model="gemini-3.8-flash", failed_account_id="acc_1", is_auth_error=True
+                model="gemini-3.8-flash", failed_account_id="acc_1"
             )
             for _ in range(3)
         ]
