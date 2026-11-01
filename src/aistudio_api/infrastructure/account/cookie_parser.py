@@ -126,6 +126,32 @@ DISCARDABLE_IMPORT_COOKIE_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# 无浏览器模式下发往签名服务和 Google RPC 的最小鉴权 Cookie 白名单
+MINIMAL_COOKIE_WHITELIST: frozenset[str] = frozenset(
+    {
+        "SID",
+        "HSID",
+        "SSID",
+        "APISID",
+        "SAPISID",
+        "__Secure-1PSID",
+        "__Secure-3PSID",
+        "__Secure-1PAPISID",
+        "__Secure-3PAPISID",
+        "__Secure-1PSIDTS",
+        "__Secure-3PSIDTS",
+        "SIDCC",
+        "__Secure-1PSIDCC",
+        "__Secure-3PSIDCC",
+        "NID",
+    }
+)
+
+
+def filter_minimal_cookies(cookies: dict[str, str]) -> dict[str, str]:
+    """只保留白名单内的鉴权 Cookie。"""
+    return {k: v for k, v in cookies.items() if k in MINIMAL_COOKIE_WHITELIST and v}
+
 
 def parse_raw_cookies(raw: object) -> dict[str, str]:
     """万能 Cookie 解析器，支持：

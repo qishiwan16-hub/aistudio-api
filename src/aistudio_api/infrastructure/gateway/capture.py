@@ -91,7 +91,12 @@ class RequestCaptureService:
         ]
 
         # 签名是一次性的票据（根据请求内容穿进 snapshot 计算），每次请求实时生成，不可复用缓存
-        snapshot = await self._session.generate_snapshot(snapshot_contents)
+        if getattr(self._session, "engine", "browser") == "browserless":
+            snapshot = await self._session.generate_snapshot(
+                snapshot_contents, ctx=ctx, model=model
+            )
+        else:
+            snapshot = await self._session.generate_snapshot(snapshot_contents)
 
         # 签名哨兵：把 thoughtSignature 替换为官方逃生口，避免上游"校验后替换内容"的死循环
         if rewritten_contents:

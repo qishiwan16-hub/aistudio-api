@@ -61,9 +61,18 @@ class AIStudioClient:
         "1024x1536": ["2:3", "1K"],
     }
 
-    def __init__(self, port: int = DEFAULT_BROWSER_PORT):
+    def __init__(self, port: int = DEFAULT_BROWSER_PORT, engine: str | None = None):
         self.port = port
-        self._session = BrowserSession(port=port)
+        self.engine = (engine or settings.engine or "browser").lower()
+        if self.engine == "browserless":
+            from aistudio_api.infrastructure.gateway.browserless import (
+                BrowserlessSession,
+            )
+
+            self._session = BrowserlessSession()  # type: ignore[assignment]
+        else:
+            self.engine = "browser"
+            self._session = BrowserSession(port=port)
         self._capture_service = RequestCaptureService(self._session)
         self._replay_service = RequestReplayService(session=self._session)
 
@@ -78,7 +87,7 @@ class AIStudioClient:
         """预热浏览器后端并加载 AI Studio 页面及捕获 BotGuard 服务。"""
         if self._session is not None:
             await self._session.ensure_botguard_service()
-            logger.info("浏览器预热就绪")
+            logger.info("[engine=%s] 预热就绪", self.engine)
 
     async def switch_auth(self, auth_file: str | None) -> None:
         """切换账号的 auth 文件并清空模板缓存。"""

@@ -245,6 +245,11 @@ class Settings:
     )
     browser_headless: bool = _load_bool_env("AISTUDIO_BROWSER_HEADLESS", default=True)
     browser_executable_path: str | None = os.getenv("AISTUDIO_BROWSER_EXECUTABLE")
+    # 运行引擎: browser = 浏览器 (Chromium + CDP), browserless = 无浏览器 (远程 WAA 签名 + 直连 HTTP)
+    engine: str = (os.getenv("AISTUDIO_ENGINE") or "browser").strip().lower()
+    proof_server_url: str = os.getenv(
+        "AISTUDIO_PROOF_SERVER_URL", "https://waa.spinsnow.fun"
+    )
     auth_file: str | None = discover_auth_file()
     tmp_dir: str = os.getenv("AISTUDIO_TMP_DIR", tempfile.gettempdir())
     proxy_url: str | None = discover_proxy_url()

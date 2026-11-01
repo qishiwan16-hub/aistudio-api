@@ -24,7 +24,7 @@ class SessionState(StrEnum):
 class SessionContext:
     """Encapsulates a fully-bootstrapped, verified AI Studio page context."""
 
-    page: CDPPage
+    page: CDPPage | None
     snap_key: str
     auth_user: str
     auth_file: str | None
@@ -42,6 +42,8 @@ class SessionContext:
             self.drain_event.set()
 
     def is_usable(self) -> bool:
+        if self.page is None:  # 无浏览器引擎没有页面
+            return bool(self.auth_file and self.snap_key)
         return not self.page.is_closed() and bool(self.snap_key)
 
 

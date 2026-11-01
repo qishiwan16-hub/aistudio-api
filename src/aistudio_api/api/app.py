@@ -51,10 +51,14 @@ async def lifespan(_app: FastAPI):
         install_process_cleanup_handlers,
     )
 
-    install_process_cleanup_handlers()
+    from aistudio_api.config import settings as _settings
+
+    if _settings.engine != "browserless":
+        install_process_cleanup_handlers()
 
     client = AIStudioClient(
         port=runtime_state.browser_port,
+        engine=_settings.engine,
     )
     runtime_state.client = client
 
@@ -75,8 +79,13 @@ async def lifespan(_app: FastAPI):
     if active_auth_path is not None and client.session is not None:
         client.session._auth_file = str(active_auth_path)
     logger.info(
-        "服务初始化完成: 监听浏览器调试端口=%d, 已加载账号数=%d",
-        runtime_state.browser_port,
+        "服务初始化完成: 引擎=%s, %s, 已加载账号数=%d",
+        client.engine,
+        (
+            f"签名服务={_settings.proof_server_url}"
+            if client.engine == "browserless"
+            else f"浏览器调试端口={runtime_state.browser_port}"
+        ),
         len(account_store.list_accounts()),
     )
     logger.debug(
@@ -455,11 +464,22 @@ def main():
     parser = argparse.ArgumentParser(description="AI Studio API Server")
     parser.add_argument("--port", type=int, default=settings.port)
     parser.add_argument("--browser-port", type=int, default=settings.browser_port)
+    parser.add_argument(
+        "--engine",
+        choices=("browser", "browserless"),
+        default=settings.engine if settings.engine in ("browser", "browserless") else "browser",
+    )
     args = parser.parse_args()
 
     runtime_state.browser_port = args.browser_port
+    settings.engine = args.engine
 
     import uvicorn
 
-    logger.info("启动服务: 监听端口=%d, 浏览器调试端口=%d", args.port, runtime_state.browser_port)
+    logger.info(
+        "启动服务: 引擎=%s, 监听端口=%d, 浏览器调试端口=%d",
+        settings.engine,
+        args.port,
+        runtime_state.browser_port,
+    )
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")

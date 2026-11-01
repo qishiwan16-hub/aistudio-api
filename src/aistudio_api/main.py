@@ -16,6 +16,12 @@ def build_parser() -> argparse.ArgumentParser:
     server_parser.add_argument(
         "--browser-port", type=int, default=settings.browser_port
     )
+    server_parser.add_argument(
+        "--engine",
+        choices=("browser", "browserless"),
+        default=None,
+        help="browser = 浏览器模式 (默认); browserless = 无浏览器模式 (远程签名)",
+    )
 
     return parser
 
@@ -45,6 +51,9 @@ def main():
         "--browser-port",
         str(browser_port_val),
     ]
+    engine = getattr(args, "engine", None)
+    if engine:
+        sys.argv += ["--engine", engine]
     server_main()
 
 
