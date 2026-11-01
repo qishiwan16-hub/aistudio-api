@@ -49,12 +49,12 @@ function parseRequests() {
   catch(e) { return []; }
 
   const reqs = [];
-  const reqRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*收到.*请求.*model=(.+)/;
-  const infoRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:Gemini 流式请求|Gemini 生成请求|流式请求|假流式请求|抗截断请求|请求).*model=([^,]+)(?:.*对话轮数=(\d+))?(?:.*尝试第\s*(\d+)\s*次)?/;
+  const reqRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*收到.*请求.*model=([^,\s]+)/;
+  const infoRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:Gemini 流式请求|Gemini 生成请求|流式请求|假流式请求|抗截断请求|请求).*model=([^,]+)(?:.*对话轮数=(\d+))?(?:.*(?:尝试第\s*(\d+)\s*次|尝试=(\d+)\/\d+))?/;
   const postRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP POST.*models\/([^:/ ]+):.*->\s*(\d+)\s*\(([\d.]+)ms\)/;
-  const hookRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*Hook 拦截成功.*model=([^,]+)(?:.*snapshot=(\d+)\s*chars)?(?:.*body=(\d+)\s*chars)?/;
-  const doneRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:假流式生成完成|Gemini 流式完成|Gemini 生成完成|抗截断生成完成|流式完成).*model=([^,]+)(?:.*输入Tokens=(\d+))?(?:.*输出Tokens=(\d+))?(?:.*总内容=(\d+))?/;
-  const geminiErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*\[aistudio\.api\.gemini\].*(?:未知严重异常|严重错误|Gemini错误|流式错误)[：:]\s*(.+)/;
+  const hookRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:Hook 拦截成功|捕获请求模板成功).*model=([^,]+)(?:.*(?:snapshot|快照长度)=(\d+))?(?:.*(?:body|请求体长度)=(\d+))?/;
+  const doneRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:假流式生成完成|Gemini 流式完成|Gemini 生成完成|抗截断生成完成|流式完成|流式请求完成|非流式请求完成).*model=([^,]+)(?:.*耗时=([\d.]+)ms)?(?:.*输入[Tt]okens=(\d+))?(?:.*输出[Tt]okens=(\d+))?(?:.*总内容=(\d+))?/;
+  const geminiErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*\[aistudio\.api\.gemini\].*(?:未知严重异常|严重错误|Gemini错误|流式错误|请求处理发生未捕获异常|响应解析异常)[：:]\s*(.+)/;
   const httpErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP (?:GET|POST)\s+(\S+)\s*->\s*(\d+)\s*\(([\d.]+)ms(?:,\s*(.+))?\)/;
   const errRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:ERROR|error|SAFETY|BLOCKED|HARM|RECITATION|RESOURCE_EXHAUSTED|finish_reason.*(?:SAFETY|RECITATION|OTHER))(.+)/i;
   const idleRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*浏览器已空闲.*?(\d+\.?\d*)\s*秒/;
@@ -81,15 +81,15 @@ function parseRequests() {
     if (m) { ensure(m[1], m[2].trim()); continue; }
 
     /* 请求详情（对话轮数、重试次数、模式） */
-    m = L.match(infoRe);
+    m = (doneRe.test(L) || hookRe.test(L)) ? null : L.match(infoRe);
     if (m) {
       const r = ensure(m[1], m[2].trim());
       if (m[3]) r.turns = m[3];
-      if (m[4]) r.retry = '第' + m[4] + '次';
+      if (m[4] || m[5]) r.retry = '第' + (m[4] || m[5]) + '次';
       if (L.includes('假流式')) r.mode = '假流式';
       else if (L.includes('抗截断')) r.mode = '抗截断';
       else if (L.includes('Gemini 流式')) r.mode = '流式';
-      else if (L.includes('Gemini 生成')) r.mode = '非流式';
+      else if (L.includes('Gemini 生成') || L.includes('非流式')) r.mode = '非流式';
       else if (L.includes('流式')) r.mode = '流式';
       continue;
     }
@@ -147,13 +147,14 @@ function parseRequests() {
         }
       }
       const r = best || ensure(dTime, dModel);
-      if (m[3]) r.inTokens = m[3];
-      if (m[4]) r.outTokens = m[4];
+      if (m[4] && m[4] !== 'None') r.inTokens = m[4];
+      if (m[5] && m[5] !== 'None') r.outTokens = m[5];
       /* 抗截断完成行用 总内容=N字符 而非 Tokens */
-      if (m[5]) { r.outTokens = m[5]; r._outUnit = '字符'; }
+      if (m[6]) { r.outTokens = m[6]; r._outUnit = '字符'; }
       r.resultText = '✅ 生成完成';
       /* 计算实际生成耗时（从请求到完成） */
-      if (best && bestDiff > 0) r.latency = (bestDiff / 1000).toFixed(1) + 's';
+      if (m[3]) r.latency = (parseFloat(m[3]) / 1000).toFixed(1) + 's';
+      else if (best && bestDiff > 0) r.latency = (bestDiff / 1000).toFixed(1) + 's';
       continue;
     }
 
