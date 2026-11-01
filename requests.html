@@ -58,6 +58,10 @@ body{background:#fafafa;color:#1a1a1a;font-family:'Space Mono',monospace;min-hei
 .stat-box .num{font-family:'Noto Serif SC',serif;font-size:24px;font-weight:900}
 .stat-box .label{font-size:9px;letter-spacing:2px;color:#999;margin-top:4px;text-transform:uppercase}
 
+.engine{margin:0 12px 10px;padding:10px 12px;border:1px solid #eee;border-radius:10px;background:#fafafa;font-size:12px;color:#555;line-height:1.9;display:none}
+.engine b{color:#1a1a1a}
+.engine .bad{color:#d33}
+.engine .good{color:#1a8a3a}
 .empty{text-align:center;padding:80px 20px;color:#ccc;font-size:13px;letter-spacing:1px}
 
 .anchor{position:fixed;bottom:12px;right:12px;z-index:20}
@@ -84,6 +88,8 @@ body{background:#fafafa;color:#1a1a1a;font-family:'Space Mono',monospace;min-hei
   <div class="stat-box"><div class="num" id="sErr">0</div><div class="label">异常</div></div>
   <div class="stat-box"><div class="num" id="sHook">0</div><div class="label">拦截</div></div>
 </div>
+
+<div class="engine" id="engineBox"></div>
 
 <div class="bar">
   <button class="btn on" id="liveBtn" onclick="toggleLive()">实时 ●</button>
@@ -128,7 +134,35 @@ function setFilter(f) {
   render();
 }
 
+async function fetchEngine() {
+  const box = document.getElementById('engineBox');
+  try {
+    const r = await fetch('/api/engine?t=' + Date.now());
+    if (!r.ok) throw 0;
+    const e = await r.json();
+    if (e.engine === 'unknown') { box.style.display = 'none'; return; }
+    let h = '引擎 <b>' + (e.engine === 'browserless' ? '无浏览器' : '浏览器') + '</b>'
+          + ' · 启动于 ' + esc(e.since || '');
+    if (e.engine === 'browserless') {
+      h += '<br>签名服务 <b>' + esc(e.server || '-') + '</b>';
+      h += '<br>签名 成功 <b class="good">' + e.ok + '</b> · 失败 <b class="' + (e.fail ? 'bad' : '') + '">' + e.fail + '</b>';
+      if (e.ok) h += ' · 平均 <b>' + e.avgMs + 'ms</b> · 最慢 <b>' + e.maxMs + 'ms</b>';
+      const pools = Object.entries(e.pool || {}).map(([k, v]) => k + ' ' + v).join(' / ');
+      if (pools) h += '<br>池状态 ' + esc(pools);
+      if (e.last) {
+        h += '<br>最近一次 ' + esc(e.last.time) + ' '
+           + (e.last.ok ? '<b class="good">成功</b> ' + esc(e.last.account) + ' ' + esc(e.last.pool) + ' ' + e.last.ms + 'ms'
+                        : '<b class="bad">失败</b>');
+      }
+      if (e.lastFail) h += '<br>最近失败 ' + esc(e.lastFail.time) + ' <span class="bad">' + esc(e.lastFail.reason) + '</span>';
+    }
+    box.innerHTML = h;
+    box.style.display = 'block';
+  } catch(err) { box.style.display = 'none'; }
+}
+
 async function fetchData() {
+  fetchEngine();
   try {
     const r = await fetch('/api/requests?t=' + Date.now());
     if (!r.ok) throw 0;

@@ -259,6 +259,46 @@ function parseRequests() {
     .slice(-200);
 }
 
+/* 引擎与 WAA 签名汇总（从最近一次启动开始统计） */
+function parseEngine() {
+  let lines;
+  try { lines = fs.readFileSync(LOG_FILES.main, 'utf8').split('\n'); }
+  catch(e) { return { engine: 'unknown' }; }
+  const startRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*服务初始化完成: 引擎=(\w+)(?:, 签名服务=(\S+?),)?/;
+  const okRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*WAA 签名成功: 服务=(\S+?), auth_user=(\d+).*?poolState=(\S+?),.*耗时=([\d.]+)ms/;
+  const failRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:WAA 签名失败|WAA 签名服务连接失败|WAA 签名服务异常)[:：]\s*(.+)/;
+  let st = null;
+  for (const L of lines) {
+    let m = L.match(startRe);
+    if (m) {
+      st = { engine: m[2], since: m[1], server: m[3] || '', ok: 0, fail: 0, totalMs: 0, maxMs: 0,
+             last: null, lastFail: null, pool: {} };
+      continue;
+    }
+    if (!st) continue;
+    m = L.match(okRe);
+    if (m) {
+      const ms = parseFloat(m[5]);
+      st.ok++; st.totalMs += ms; if (ms > st.maxMs) st.maxMs = ms;
+      st.server = st.server || m[2];
+      st.pool[m[4]] = (st.pool[m[4]] || 0) + 1;
+      st.last = { time: m[1], account: 'u/' + m[3], pool: m[4], ms: Math.round(ms), ok: true };
+      continue;
+    }
+    m = L.match(failRe);
+    if (m) {
+      st.fail++;
+      st.lastFail = { time: m[1], reason: m[2].trim().slice(0, 300) };
+      st.last = { time: m[1], ok: false, reason: st.lastFail.reason };
+    }
+  }
+  if (!st) return { engine: 'unknown' };
+  st.avgMs = st.ok ? Math.round(st.totalMs / st.ok) : 0;
+  st.maxMs = Math.round(st.maxMs);
+  delete st.totalMs;
+  return st;
+}
+
 const server = http.createServer((req, res) => {
   const parsed = url.parse(req.url, true);
   const pn = parsed.pathname;
@@ -283,6 +323,13 @@ const server = http.createServer((req, res) => {
     const data = parseRequests();
     res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
     res.end(JSON.stringify(data));
+    return;
+  }
+
+  /* 引擎 / 签名汇总 API */
+  if (pn === '/api/engine') {
+    res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
+    res.end(JSON.stringify(parseEngine()));
     return;
   }
 
