@@ -151,6 +151,8 @@ docker run -d \
 |---|---|---|
 | 请求监控 | `http://localhost:18082/requests` | 每个请求的模型、状态、token 数、耗时、完成/失败标签 |
 | 实时日志 | `http://localhost:18082/` | 带语法高亮的实时日志流 |
+| WAA 状态与管理 | `http://localhost:18082/waa` | 状态概览及只读签名池信息 |
+| WAA 签名服务设置 | `http://localhost:18082/waa/settings` | 配置签名服务、节点代理、测试连接与手动切换 |
 
 **请求监控卡片显示**：
 - ✅ 生成完成 / ❌ 失败 / 💤 浏览器空闲回收

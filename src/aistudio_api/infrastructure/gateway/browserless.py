@@ -28,6 +28,7 @@ from aistudio_api.infrastructure.account.cookie_parser import (
     get_tier_header_value,
     normalize_benefit_tier,
 )
+from aistudio_api.infrastructure.gateway.model_defaults import get_active_waa_server
 from aistudio_api.infrastructure.gateway.session_state import (
     SessionContext,
     SessionReadinessGate,
@@ -351,9 +352,13 @@ class BrowserlessSession:
         self._gate = SessionReadinessGate()
         self._transition_lock = asyncio.Lock()
         self._transport = HTTPStreamTransport(proxy_url=settings.proxy_url)
+        self._signer_config = get_active_waa_server()
+        initial_proxy = str(self._signer_config.get("proxy_url") or "").strip()
         self._signer = WaaSigner(
-            proof_server_url=settings.proof_server_url,
-            proxy_url=settings.proxy_url,
+            proof_server_url=str(self._signer_config.get("url") or settings.proof_server_url),
+            proxy_url=(
+                None if initial_proxy.lower() == "direct" else initial_proxy or settings.proxy_url
+            ),
         )
         self._in_flight = 0
 
@@ -411,6 +416,22 @@ class BrowserlessSession:
             self._in_flight = max(0, self._in_flight - 1)
 
     async def ensure_ready(self) -> SessionContext:
+        active_signer = get_active_waa_server()
+        signer_url = str(active_signer.get("url") or settings.proof_server_url).rstrip("/")
+        raw_proxy = str(active_signer.get("proxy_url") or "").strip()
+        signer_proxy = None if raw_proxy.lower() == "direct" else (raw_proxy or settings.proxy_url)
+        current = self._signer._remote_signer
+        if current.server_url != signer_url or current.proxy_url != signer_proxy:
+            async with self._transition_lock:
+                current = self._signer._remote_signer
+                if current.server_url != signer_url or current.proxy_url != signer_proxy:
+                    await self._signer.close()
+                    self._signer = WaaSigner(
+                        proof_server_url=signer_url,
+                        proxy_url=signer_proxy,
+                    )
+                    self._signer_config = active_signer
+                    self._gate.reset()
         ctx = self._gate.active_context
         if self._gate.is_ready() and ctx is not None:
             return ctx
@@ -452,6 +473,15 @@ class BrowserlessSession:
                 auth_user = get_auth_user_from_meta(auth_file)
                 tier = get_tier_from_meta(auth_file)
                 template = json.loads(json.dumps(DEFAULT_BOOTSTRAP_TEMPLATE))
+                if self._signer_config.get("user_agent"):
+                    template["headers"]["User-Agent"] = str(
+                        self._signer_config["user_agent"]
+                    )
+                extra_headers = self._signer_config.get("headers")
+                if isinstance(extra_headers, dict):
+                    template["headers"].update(
+                        {str(k): str(v) for k, v in extra_headers.items()}
+                    )
                 template["headers"]["X-Goog-AuthUser"] = auth_user
                 new_ctx = SessionContext(
                     page=None,  # type: ignore[arg-type]
@@ -587,6 +617,7 @@ class BrowserlessSession:
 
     async def _close_internal(self) -> None:
         await self._transport.close()
+        await self._signer.close()
         self._gate.reset()
 
     async def close(self) -> None:

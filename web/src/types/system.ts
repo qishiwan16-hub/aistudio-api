@@ -11,6 +11,26 @@ export interface SystemConfig {
   dump_to_file?: boolean
   dump_dir?: string
 }
+export interface SignerServerItem {
+  id: string
+  name: string
+  description?: string
+  url: string
+  proxy_url?: string
+  user_agent?: string
+  headers?: Record<string, string>
+  is_active?: boolean
+}
+export interface SignerServersResponse {
+  active_server: string
+  servers: SignerServerItem[]
+}
+export interface TestSignerServerResponse {
+  ok: boolean
+  status_code?: number
+  elapsed_ms: number
+  error?: string
+}
 export interface UpdateLoggingConfigRequest {
   level?: string
   dump_requests?: boolean

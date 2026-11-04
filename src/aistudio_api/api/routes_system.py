@@ -259,6 +259,25 @@ class ConfigYamlUpdateRequest(BaseModel):
     yaml_content: str
 
 
+class SwitchSignerServerRequest(BaseModel):
+    server_id: str
+
+
+class UpsertSignerServerRequest(BaseModel):
+    id: str | None = None
+    name: str
+    description: str = ""
+    url: str
+    proxy_url: str = ""
+    user_agent: str = ""
+    headers: dict[str, str] = {}
+
+
+class TestSignerServerRequest(BaseModel):
+    url: str
+    proxy_url: str = ""
+
+
 @protected_router.get("/config")
 async def get_system_config() -> dict[str, object]:
     """获取系统运行配置与 config.yaml 内容。"""
@@ -289,6 +308,89 @@ async def get_system_config() -> dict[str, object]:
         "dump_to_file": is_dump_to_file_enabled(),
         "dump_dir": str(get_dump_dir()),
     }
+
+
+@protected_router.get("/config/signer-servers")
+async def get_signer_servers() -> dict[str, object]:
+    from aistudio_api.infrastructure.gateway.model_defaults import get_configured_waa_settings
+
+    waa = get_configured_waa_settings()
+    active_id = str(waa.get("active_server") or "remote_spinsnow")
+    raw_servers = waa.get("servers")
+    servers = raw_servers if isinstance(raw_servers, list) else []
+    result = []
+    for server in servers:
+        if isinstance(server, dict):
+            item = dict(server)
+            item["is_active"] = str(item.get("id") or "") == active_id
+            result.append(item)
+    return {"active_server": active_id, "servers": result}
+
+
+@protected_router.post("/config/signer-servers/switch")
+async def switch_signer_server(req: SwitchSignerServerRequest) -> dict[str, object]:
+    from aistudio_api.infrastructure.gateway.model_defaults import switch_active_waa_server
+
+    try:
+        active = switch_active_waa_server(req.server_id)
+    except ValueError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+    return {"ok": True, "active_server": active}
+
+
+@protected_router.put("/config/signer-servers")
+async def upsert_signer_server(req: UpsertSignerServerRequest) -> dict[str, object]:
+    from aistudio_api.infrastructure.gateway.model_defaults import upsert_waa_server
+
+    url = req.url.strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, detail="Signer URL must use http:// or https://")
+    if req.proxy_url and not req.proxy_url.startswith(("http://", "https://", "socks5://", "socks5h://")):
+        raise HTTPException(400, detail="Proxy URL must use HTTP(S) or SOCKS5")
+    saved = upsert_waa_server(req.model_dump(exclude_none=True))
+    return {"ok": True, "server": saved}
+
+
+@protected_router.delete("/config/signer-servers/{server_id}")
+async def delete_signer_server(server_id: str) -> dict[str, bool]:
+    from aistudio_api.infrastructure.gateway.model_defaults import delete_waa_server
+
+    try:
+        removed = delete_waa_server(server_id)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(404, detail="Signer server not found")
+    return {"ok": True}
+
+
+@protected_router.post("/config/signer-servers/test")
+async def test_signer_server(req: TestSignerServerRequest) -> dict[str, object]:
+    import time
+    import httpx
+
+    url = req.url.strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, detail="Signer URL must use http:// or https://")
+    local = "127.0.0.1" in url or "localhost" in url or "[::1]" in url
+    proxy = None if local else (req.proxy_url.strip() or None)
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=8.0, proxy=proxy) as client:
+            response = await client.get(f"{url}/health")
+        elapsed = round((time.perf_counter() - started) * 1000, 1)
+        return {
+            "ok": response.status_code == 200,
+            "status_code": response.status_code,
+            "elapsed_ms": elapsed,
+            "data": response.json() if response.status_code == 200 else {},
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
 
 
 @protected_router.put("/config/yaml")

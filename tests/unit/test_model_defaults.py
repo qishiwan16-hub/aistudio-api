@@ -1,4 +1,10 @@
-from aistudio_api.infrastructure.gateway.model_defaults import resolve_model_defaults
+from aistudio_api.infrastructure.gateway.model_defaults import (
+    delete_waa_server,
+    get_active_waa_server,
+    resolve_model_defaults,
+    switch_active_waa_server,
+    upsert_waa_server,
+)
 from aistudio_api.infrastructure.gateway.wire_types import AistudioImageOutputMode
 
 
@@ -13,6 +19,34 @@ def test_resolve_model_defaults_uses_repo_config_for_gemma():
         (None, None, 9, 5),
         (None, None, 10, 5),
     )
+
+
+def test_waa_server_config_crud_preserves_per_server_proxy(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("waa:\n  active_server: remote\n  servers: []\n", encoding="utf-8")
+    server = upsert_waa_server(
+        {
+            "id": "remote",
+            "name": "Remote",
+            "url": "https://signer.example",
+            "proxy_url": "socks5://127.0.0.1:1080",
+            "headers": {"X-Test": "yes"},
+        },
+        config_path=path,
+    )
+
+    assert server["proxy_url"] == "socks5://127.0.0.1:1080"
+    assert get_active_waa_server(path)["proxy_url"] == "socks5://127.0.0.1:1080"
+    upsert_waa_server(
+        {**server, "id": "backup", "name": "Backup", "proxy_url": ""},
+        config_path=path,
+    )
+    assert switch_active_waa_server("backup", config_path=path)["id"] == "backup"
+    assert delete_waa_server("remote", config_path=path) is True
+    import pytest
+
+    with pytest.raises(ValueError, match="last WAA signer"):
+        delete_waa_server("backup", config_path=path)
 
 
 def test_resolve_model_defaults_merges_yaml_profiles(tmp_path):

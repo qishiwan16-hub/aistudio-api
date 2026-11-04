@@ -2,6 +2,20 @@
 # 留空 [] 表示对外 API 免 Key 开放调用；配置密钥后客户端必须携带对应 Key 访问。
 api_keys: []
 
+waa:
+  active_server: remote_spinsnow
+  servers:
+    - id: remote_spinsnow
+      name: Remote WAA signer
+      description: Hosted signer compatible with AI Studio proof minting
+      url: https://waa.spinsnow.fun
+      proxy_url: http://127.0.0.1:7892
+      user_agent: >-
+        Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+        (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+      headers:
+        X-User-Agent: grpc-web-javascript/0.1
+
 # 服务端日志与请求转储调试配置
 logging:
   # 日志输出级别: DEBUG / INFO / WARNING / ERROR

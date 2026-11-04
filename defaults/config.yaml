@@ -1,6 +1,20 @@
 # API 客户端调用鉴权密钥列表 (用于外部客户端调用 /v1beta/... 接口鉴权)
 api_keys: []
 
+waa:
+  active_server: remote_spinsnow
+  servers:
+    - id: remote_spinsnow
+      name: Remote WAA signer
+      description: Hosted signer compatible with AI Studio proof minting
+      url: https://waa.spinsnow.fun
+      proxy_url: http://127.0.0.1:7892
+      user_agent: >-
+        Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+        (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+      headers:
+        X-User-Agent: grpc-web-javascript/0.1
+
 # 服务端日志与请求转储调试配置
 logging:
   level: INFO

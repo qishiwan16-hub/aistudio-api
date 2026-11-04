@@ -61,6 +61,72 @@ async def test_spa_endpoints():
 
 
 @pytest.mark.asyncio
+async def test_signer_server_management_routes_roundtrip_proxy(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aistudio_api.api import routes_system
+    from aistudio_api.infrastructure.gateway import model_defaults
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("waa:\n  active_server: remote\n  servers: []\n", encoding="utf-8")
+    monkeypatch.setattr(model_defaults, "_resolve_config_path", lambda _path=None: config_path)
+    monkeypatch.setattr(routes_system, "_resolve_config_path", lambda _path=None: config_path)
+
+    async with _client() as client:
+        saved = await client.put(
+            "/config/signer-servers",
+            json={
+                "id": "remote",
+                "name": "Remote signer",
+                "url": "https://signer.example",
+                "proxy_url": "http://proxy.example:8080",
+                "headers": {"X-Test": "yes"},
+            },
+        )
+        assert saved.status_code == 200
+        assert saved.json()["server"]["proxy_url"] == "http://proxy.example:8080"
+        listed = await client.get("/config/signer-servers")
+        assert listed.json()["servers"][0]["proxy_url"] == "http://proxy.example:8080"
+        switched = await client.post(
+            "/config/signer-servers/switch", json={"server_id": "remote"}
+        )
+        assert switched.status_code == 200
+        removed = await client.delete("/config/signer-servers/remote")
+        assert removed.status_code == 400
+
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"ok": True}
+
+    created_clients = []
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            created_clients.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url):
+            return response
+
+    fake_httpx = SimpleNamespace(AsyncClient=FakeAsyncClient)
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+    result = await routes_system.test_signer_server(
+        routes_system.TestSignerServerRequest(
+            url="https://signer.example", proxy_url="http://proxy.example:8080"
+        )
+    )
+    assert result["ok"] is True
+    assert created_clients[0].kwargs["proxy"] == "http://proxy.example:8080"
+
+
+@pytest.mark.asyncio
 async def test_get_config_endpoint():
     async with _client() as client:
         resp = await client.get("/config")

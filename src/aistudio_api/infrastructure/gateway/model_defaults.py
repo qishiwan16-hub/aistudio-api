@@ -274,6 +274,20 @@ def _profile_from_mapping(raw: dict[str, object]) -> ModelProfile:
 
 def _default_config() -> dict[str, object]:
     return {
+        "waa": {
+            "active_server": "remote_spinsnow",
+            "servers": [
+                {
+                    "id": "remote_spinsnow",
+                    "name": "Remote WAA signer",
+                    "description": "Hosted signer compatible with AI Studio proof minting",
+                    "url": "https://waa.spinsnow.fun",
+                    "proxy_url": "",
+                    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+                    "headers": {"X-User-Agent": "grpc-web-javascript/0.1"},
+                },
+            ],
+        },
         "logging": {
             "level": "INFO",
             "dump_requests": False,
@@ -803,3 +817,115 @@ def get_configured_paid_model_rules(
     if isinstance(def_rules, dict):
         return def_rules
     return {}
+
+
+def get_configured_waa_settings(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    config = _load_yaml_config(_resolve_config_path(config_path))
+    waa = config.get("waa")
+    return waa if isinstance(waa, dict) else _default_config()["waa"]
+
+
+def get_active_waa_server(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    waa = get_configured_waa_settings(config_path)
+    servers = waa.get("servers")
+    active_id = str(waa.get("active_server") or "remote_spinsnow")
+    if isinstance(servers, list):
+        for server in servers:
+            if isinstance(server, dict) and str(server.get("id") or "") == active_id:
+                return dict(server)
+        for server in servers:
+            if isinstance(server, dict):
+                return dict(server)
+    return dict(_default_config()["waa"]["servers"][0])
+
+
+def _write_waa_settings(
+    transform, config_path: str | os.PathLike[str] | None = None
+) -> dict[str, object]:
+    path = _resolve_config_path(config_path)
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    waa = parsed.get("waa")
+    if not isinstance(waa, dict):
+        waa = dict(_default_config()["waa"])
+    transform(waa)
+    parsed["waa"] = waa
+    path.write_text(yaml.dump(parsed, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    invalidate_config_cache()
+    return waa
+
+
+def switch_active_waa_server(
+    server_id: str, config_path: str | os.PathLike[str] | None = None
+) -> dict[str, object]:
+    target = server_id.strip()
+    waa = get_configured_waa_settings(config_path)
+    servers = waa.get("servers")
+    if not isinstance(servers, list) or not any(
+        isinstance(server, dict) and server.get("id") == target for server in servers
+    ):
+        raise ValueError(f"Unknown WAA signer server: {target}")
+    _write_waa_settings(lambda data: data.__setitem__("active_server", target), config_path)
+    return get_active_waa_server(config_path)
+
+
+def upsert_waa_server(
+    server_data: dict[str, object], config_path: str | os.PathLike[str] | None = None
+) -> dict[str, object]:
+    import uuid
+
+    item = dict(server_data)
+    item["id"] = str(item.get("id") or f"signer_{uuid.uuid4().hex[:8]}").strip()
+    item["name"] = str(item.get("name") or "WAA signer").strip()
+    item["url"] = str(item.get("url") or "").strip().rstrip("/")
+    item["proxy_url"] = str(item.get("proxy_url") or "").strip()
+    item["user_agent"] = str(item.get("user_agent") or "").strip()
+    item["description"] = str(item.get("description") or "").strip()
+    headers = item.get("headers")
+    item["headers"] = (
+        {str(key): str(value) for key, value in headers.items()}
+        if isinstance(headers, dict)
+        else {}
+    )
+
+    def update(waa):
+        servers = waa.get("servers")
+        servers = list(servers) if isinstance(servers, list) else []
+        for index, server in enumerate(servers):
+            if isinstance(server, dict) and server.get("id") == item["id"]:
+                servers[index] = item
+                break
+        else:
+            servers.append(item)
+        waa["servers"] = servers
+
+    _write_waa_settings(update, config_path)
+    return item
+
+
+def delete_waa_server(
+    server_id: str, config_path: str | os.PathLike[str] | None = None
+) -> bool:
+    removed = False
+
+    def update(waa):
+        nonlocal removed
+        servers = waa.get("servers")
+        servers = list(servers) if isinstance(servers, list) else []
+        kept = [server for server in servers if not isinstance(server, dict) or server.get("id") != server_id]
+        removed = len(kept) != len(servers)
+        if not removed:
+            return
+        if not kept:
+            raise ValueError("Cannot remove the last WAA signer server")
+        waa["servers"] = kept
+        if waa.get("active_server") == server_id:
+            waa["active_server"] = str(kept[0].get("id") or "")
+
+    _write_waa_settings(update, config_path)
+    return removed

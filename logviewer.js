@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const PORT = 18082;
+const PORT = Number(process.env.LOGVIEWER_PORT || 18082);
 const BASE = path.join(process.env.HOME || '/data/data/com.termux/files/home', 'aistudio-api');
 
 const LOG_FILES = {
@@ -350,7 +350,26 @@ function waaPage() {
     + 'return f(u,o)}})();</script>';
   html = html.replace('<script>', shim + '<script>');
   html = html.replace(/(<div class="brand-title">)WAA \/\/ RELAY GATEWAY/, '$1WAA // 无浏览器模式（只读预览）');
+  html = html.replace(
+    '<div class="brand-title">WAA // 无浏览器模式（只读预览）</div>',
+    '<div class="brand-title">WAA // 无浏览器模式（只读预览）</div><a href="/waa/settings" style="display:inline-block;margin-top:10px;padding:8px 12px;border:1px solid #64748b;border-radius:6px;color:#e2e8f0;text-decoration:none">签名服务设置</a>'
+  );
   return html;
+}
+
+function waaSettingsPage() {
+  return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WAA 签名服务</title><style>
+  *{box-sizing:border-box}body{margin:0;background:#f5f7fa;color:#18212f;font:14px system-ui,-apple-system,"Segoe UI",sans-serif}header{background:white;border-bottom:1px solid #dce2e9;padding:16px 20px;display:flex;align-items:center;justify-content:space-between}h1{font-size:18px;margin:0}main{max-width:1050px;margin:0 auto;padding:22px 18px}.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}button{border:1px solid #cbd3dc;background:#fff;color:#18212f;border-radius:5px;padding:8px 11px;cursor:pointer}button.primary{background:#2457c5;color:white;border-color:#2457c5}button.danger{color:#b42318}.list{border-top:1px solid #dce2e9}.row{padding:15px 2px;border-bottom:1px solid #dce2e9;display:flex;justify-content:space-between;gap:15px;align-items:center}.info{min-width:0}.name{font-weight:650}.url,.meta{margin-top:5px;color:#5d6978;font-size:12px;overflow-wrap:anywhere}.actions{display:flex;gap:7px;flex-wrap:wrap}.tag{font-size:11px;background:#eaf5ef;color:#18643d;padding:3px 7px;border-radius:4px;margin-left:8px}.modal{position:fixed;inset:0;background:#0007;display:grid;place-items:center;padding:18px}.box{background:#fff;border-radius:7px;padding:18px;width:min(620px,100%);max-height:92vh;overflow:auto}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.fields label{font-size:12px;color:#55606f}.fields input,.fields textarea{display:block;width:100%;padding:9px;margin-top:5px;border:1px solid #cbd3dc;border-radius:4px;font:13px system-ui}.wide{grid-column:1/-1}.footer{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}.hint{font-size:11px;color:#778293;margin-top:5px}#msg{padding:8px 0;color:#a33}a{color:#315dae}@media(max-width:650px){.row{align-items:flex-start;flex-direction:column}.fields{grid-template-columns:1fr}.wide{grid-column:auto}}
+  </style></head><body><header><h1>WAA 签名服务</h1><a href="/waa">返回 WAA 状态面板</a></header><main><div class="bar"><div>选择签名节点并设置节点代理。更改立即写入 API 服务配置。</div><button class="primary" onclick="openForm()">添加服务</button></div><div id="msg"></div><div id="list" class="list">加载中…</div></main><div id="modal" class="modal" style="display:none" onclick="if(event.target===this)closeForm()"><form class="box" onsubmit="save(event)"><h2 id="formTitle" style="font-size:16px;margin:0 0 15px">添加签名服务</h2><div class="fields"><label>名称<input id="name" required></label><label>服务 URL<input id="url" required placeholder="https://signer.example"></label><label class="wide">节点代理<input id="proxy" placeholder="http://user:pass@host:port；留空继承全局，填 direct 表示直连"><div class="hint">本地 signer 会忽略代理；远程节点使用此代理访问 signer。</div></label><label class="wide">User-Agent<input id="ua"></label><label class="wide">自定义请求头 JSON<textarea id="headers" rows="4">{}</textarea></label><label class="wide">描述<input id="description"></label></div><div class="footer"><button type="button" onclick="closeForm()">取消</button><button class="primary" type="submit">保存</button></div></form></div><script>
+  let data={servers:[],active_server:''}, editing=null;const api='/api/waa-config';const msg=(s)=>document.getElementById('msg').textContent=s||'';
+  async function call(path,method='GET',body){const r=await fetch(api+path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,credentials:'same-origin'});const d=await r.json();if(!r.ok)throw Error(d.detail||d.error||('HTTP '+r.status));return d}
+  async function load(){try{data=await call('/signer-servers');render();msg('')}catch(e){msg('加载失败：'+e.message)}}
+  function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+  function render(){const root=document.getElementById('list');root.innerHTML=data.servers.map(s=>'<article class="row"><div class="info"><div class="name">'+esc(s.name)+(s.id===data.active_server?'<span class="tag">正在使用</span>':'')+'</div><div class="url">'+esc(s.url)+'</div><div class="meta">节点代理：'+(s.proxy_url?'已配置':'继承全局')+(s.description?' · '+esc(s.description):'')+'</div></div><div class="actions"><button onclick="test(\''+esc(s.id)+'\')">测试</button>'+(s.id!==data.active_server?'<button onclick="switchTo(\''+esc(s.id)+'\')">切换</button>':'')+'<button onclick="edit(\''+esc(s.id)+'\')">编辑</button>'+(s.id!==data.active_server?'<button class="danger" onclick="removeServer(\''+esc(s.id)+'\')">删除</button>':'')+'</div></article>').join('')||'<div style="padding:18px 0;color:#718096">没有配置 signer。</div>'}
+  function showForm(s={}){editing=s.id||null;document.getElementById('formTitle').textContent=editing?'编辑签名服务':'添加签名服务';for(const [id,key] of [['name','name'],['url','url'],['proxy','proxy_url'],['ua','user_agent'],['description','description']])document.getElementById(id).value=s[key]||'';document.getElementById('headers').value=JSON.stringify(s.headers||{},null,2);document.getElementById('modal').style.display='grid'}function closeForm(){document.getElementById('modal').style.display='none'}function edit(id){showForm(data.servers.find(s=>s.id===id)||{})}
+  async function save(e){e.preventDefault();try{const headers=JSON.parse(document.getElementById('headers').value||'{}');if(!headers||Array.isArray(headers)||typeof headers!=='object')throw Error('请求头必须是 JSON 对象');const s=data.servers.find(x=>x.id===editing)||{};await call('/signer-servers','PUT',{id:editing||undefined,name:document.getElementById('name').value,url:document.getElementById('url').value,proxy_url:document.getElementById('proxy').value,user_agent:document.getElementById('ua').value,description:document.getElementById('description').value,headers});closeForm();await load()}catch(e){msg('保存失败：'+e.message)}}
+  async function switchTo(id){try{await call('/signer-servers/switch','POST',{server_id:id});await load()}catch(e){msg('切换失败：'+e.message)}}async function removeServer(id){if(!confirm('删除此签名服务？'))return;try{await call('/signer-servers/'+encodeURIComponent(id),'DELETE');await load()}catch(e){msg('删除失败：'+e.message)}}async function test(id){const s=data.servers.find(x=>x.id===id);try{const r=await call('/signer-servers/test','POST',{url:s.url,proxy_url:s.proxy_url||''});msg(r.ok?'连接成功：'+r.elapsed_ms+' ms':'连接失败：'+(r.error||r.status_code))}catch(e){msg('测试失败：'+e.message)}}
+  function openForm(){showForm({url:'https://waa.spinsnow.fun',headers:{'X-User-Agent':'grpc-web-javascript/0.1'}})}load();</script></body></html>`;
 }
 
 const server = http.createServer((req, res) => {
@@ -380,7 +399,39 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  /* pg-bridge 面板只读预览 */
+  /* WAA signer 管理与只读 pg-bridge 预览 */
+  if (pn === '/waa/settings') {
+    res.writeHead(200, {'Content-Type':'text/html; charset=utf-8', 'Cache-Control':'no-store'});
+    res.end(waaSettingsPage());
+    return;
+  }
+  if (pn === '/api/waa-config' || pn.startsWith('/api/waa-config/')) {
+    const apiBase = process.env.AISTUDIO_API_URL || 'http://127.0.0.1:8080';
+    const suffix = pn.slice('/api/waa-config'.length);
+    const target = new URL('/config/signer-servers' + suffix + (parsed.search || ''), apiBase);
+    const headers = {};
+    for (const name of ['cookie', 'authorization', 'content-type', 'content-length']) {
+      if (req.headers[name]) headers[name] = req.headers[name];
+    }
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      const proxyReq = http.request(target, { method: req.method, headers }, proxyRes => {
+        res.writeHead(proxyRes.statusCode || 502, {
+          'Content-Type': proxyRes.headers['content-type'] || 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        });
+        proxyRes.pipe(res);
+      });
+      proxyReq.on('error', error => {
+        if (!res.headersSent) res.writeHead(502, {'Content-Type':'application/json; charset=utf-8'});
+        res.end(JSON.stringify({detail:'API proxy failed: '+error.message}));
+      });
+      if (chunks.length) proxyReq.write(Buffer.concat(chunks));
+      proxyReq.end();
+    });
+    return;
+  }
   if (pn === '/waa') {
     try { res.writeHead(200, {'Content-Type':'text/html; charset=utf-8'}); res.end(waaPage()); }
     catch(e) { res.writeHead(500, {'Content-Type':'text/plain; charset=utf-8'}); res.end('面板加载失败: ' + e.message); }

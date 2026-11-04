@@ -5,6 +5,7 @@ import { useToastStore } from '@/stores/toast.ts'
 import type { SystemConfig } from '@/types/system.ts'
 import ApiKeyManagerCard from '@/components/settings/ApiKeyManagerCard.vue'
 import LogConfigCard from '@/components/settings/LogConfigCard.vue'
+import SignerServerCard from '@/components/settings/SignerServerCard.vue'
 import VisualConfigEditor from '@/components/config/VisualConfigEditor.vue'
 import {
   Server,
@@ -139,6 +140,8 @@ onMounted(() => {
       :initial-config="config"
       @saved="loadConfig"
     />
+    <SignerServerCard />
+
     <!-- API Key Management Card -->
     <ApiKeyManagerCard />
 
