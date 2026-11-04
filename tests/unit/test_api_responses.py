@@ -17,6 +17,68 @@ from aistudio_api.domain.errors import (
 )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "expected_penalty"),
+    [("gemini-4-argon", None), ("gemini-2.5-flash", 0.3)],
+)
+async def test_openai_adapter_handles_penalties_per_model(
+    monkeypatch, model, expected_penalty
+):
+    from types import SimpleNamespace
+
+    import httpx
+    from aistudio_api.api import routes_openai
+    from aistudio_api.api.app import app
+    from aistudio_api.config import settings
+    from aistudio_api.api.response_models import (
+        GeminiCandidateResponse,
+        GeminiContentResponse,
+        GeminiGenerateContentResponse,
+        GeminiPartResponse,
+    )
+
+    captured = {}
+
+    async def fake_generate(model, request, client, stream=False):
+        captured["model"] = model
+        captured["config"] = request.generationConfig
+        return GeminiGenerateContentResponse(
+            candidates=[
+                GeminiCandidateResponse(
+                    content=GeminiContentResponse(parts=[GeminiPartResponse(text="ok")])
+                )
+            ]
+        )
+
+    monkeypatch.setattr(settings, "api_keys", frozenset())
+    monkeypatch.setattr(routes_openai, "handle_gemini_generate_content", fake_generate)
+    monkeypatch.setattr(routes_openai, "get_client", lambda: object())
+    monkeypatch.setattr(routes_openai, "_parse_model_variant", lambda model: (model, None))
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "test"}],
+                "presence_penalty": 0.3,
+                "frequency_penalty": 0.2,
+                "temperature": 0.7,
+                "stream": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["config"].presencePenalty == expected_penalty
+    assert captured["config"].frequencyPenalty == (
+        None if expected_penalty is None else 0.2
+    )
+    assert captured["config"].temperature == 0.7
+
+
 def test_to_gemini_usage_metadata_uses_visible_and_reasoning_tokens():
     assert to_gemini_usage_metadata(
         {

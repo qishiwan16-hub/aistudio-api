@@ -260,10 +260,14 @@ async def openai_chat_completions(request: Request):
         gen_config_dict["maxOutputTokens"] = body["max_tokens"]
     if "top_k" in body and body["top_k"] is not None:
         gen_config_dict["topK"] = body["top_k"]
-    if "presence_penalty" in body and body["presence_penalty"] is not None:
-        gen_config_dict["presencePenalty"] = body["presence_penalty"]
-    if "frequency_penalty" in body and body["frequency_penalty"] is not None:
-        gen_config_dict["frequencyPenalty"] = body["frequency_penalty"]
+
+    # Gemini 4 Argon rejects presence/frequency penalties at the upstream API.
+    supports_penalties = "gemini-4-argon" not in model.lower()
+    if supports_penalties:
+        if "presence_penalty" in body and body["presence_penalty"] is not None:
+            gen_config_dict["presencePenalty"] = body["presence_penalty"]
+        if "frequency_penalty" in body and body["frequency_penalty"] is not None:
+            gen_config_dict["frequencyPenalty"] = body["frequency_penalty"]
 
     gen_config = GeminiGenerationConfig(**gen_config_dict) if gen_config_dict else None
 
