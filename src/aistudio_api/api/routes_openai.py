@@ -360,22 +360,6 @@ async def _openai_stream(
                         data = json.loads(data_str)
                     except json.JSONDecodeError:
                         continue
-                    # 抗截断收尾会附 usage/finish 元数据；这些不是正文。
-                    if "usageMetadata" in data or "error" in data:
-                        if "error" in data:
-                            error = data["error"]
-                            message = error.get("message", "upstream error") if isinstance(error, dict) else str(error)
-                            code = error.get("code", 502) if isinstance(error, dict) else 502
-                            await output_queue.put(
-                                _make_openai_chunk(
-                                    chat_id,
-                                    display_model,
-                                    {"content": f"[Error]: {message}"},
-                                    "stop",
-                                )
-                            )
-                            logger.warning("OpenAI 上游错误帧: code=%s", code)
-                        continue
                     text = _extract_text_from_gemini(data)
                     if text and text != "\u200b":  # 跳过 Gemini 层心跳零宽空格
                         await output_queue.put(
