@@ -124,15 +124,15 @@ def _convert_messages_to_gemini(
 
 
 def _extract_text_from_gemini(data: dict) -> str:
-    """从 Gemini 普通文本响应提取文本，跳过 thought。"""
+    """从 Gemini 响应提取文本，跳过 thought。"""
     try:
         parts = data["candidates"][0]["content"]["parts"]
         text_parts = []
-        for part in parts:
-            if part.get("thought", False):
+        for p in parts:
+            if p.get("thought", False):
                 continue
-            if "text" in part and part["text"]:
-                text_parts.append(part["text"])
+            if "text" in p and p["text"]:
+                text_parts.append(p["text"])
         return "".join(text_parts)
     except (KeyError, IndexError, TypeError):
         return ""
@@ -380,11 +380,6 @@ async def _openai_stream(
                     if text and text != "\u200b":  # 跳过 Gemini 层心跳零宽空格
                         await output_queue.put(
                             _make_openai_chunk(chat_id, display_model, {"content": text})
-                        )
-                        logger.info(
-                            "OpenAI 正文帧已转换: model=%s, chars=%d",
-                            display_model,
-                            len(text),
                         )
         except Exception as e:
             logger.error("OpenAI 流式转换错误: %s", e, exc_info=True)
