@@ -79,6 +79,50 @@ async def test_openai_adapter_handles_penalties_per_model(
     assert captured["config"].temperature == 0.7
 
 
+@pytest.mark.asyncio
+async def test_openai_fake_stream_keeps_plain_text_response(monkeypatch):
+    import httpx
+    from fastapi.responses import StreamingResponse
+
+    from aistudio_api.api import routes_openai
+    from aistudio_api.api.app import app
+    from aistudio_api.config import settings
+
+    async def fake_stream_body():
+        yield (
+            'data: {"candidates":[{"content":{"parts":[{"text":"假流式正文"}]},'
+            '"index":0}]}\n\n'
+        )
+
+    monkeypatch.setattr(settings, "api_keys", frozenset())
+    monkeypatch.setattr(routes_openai, "get_client", lambda: object())
+    monkeypatch.setattr(routes_openai, "_parse_model_variant", lambda model: (model, "fake_stream"))
+
+    import aistudio_api.application.fake_stream as fake_stream
+
+    monkeypatch.setattr(
+        fake_stream,
+        "build_fake_stream_response",
+        lambda *args, **kwargs: StreamingResponse(fake_stream_body()),
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "假流式-gemini-4-argon",
+                "messages": [{"role": "user", "content": "test"}],
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert '"content": "假流式正文"' in response.text
+    assert "functionCall" not in response.text
+
+
 def test_to_gemini_usage_metadata_uses_visible_and_reasoning_tokens():
     assert to_gemini_usage_metadata(
         {
