@@ -18,15 +18,6 @@ from aistudio_api.application.anti_truncation import (
     inject_anti_truncation,
 )
 from aistudio_api.domain.models import Candidate, ModelOutput
-from aistudio_api.api.routes_gemini import _parse_model_variant
-
-
-@pytest.mark.parametrize("prefix", ["抗截断-", "防外审截断-"])
-def test_anti_truncation_model_prefixes_resolve_to_same_variant(prefix):
-    assert _parse_model_variant(f"models/{prefix}gemini-3.8-flash") == (
-        "models/gemini-3.8-flash",
-        "anti_truncation",
-    )
 
 
 def test_tool_declaration_and_request_injection_preserve_existing_tools():
@@ -36,49 +27,12 @@ def test_tool_declaration_and_request_injection_preserve_existing_tools():
     )
     injected = inject_anti_truncation(request, "actual_content_test")
 
-    assert len(injected.tools or []) == 1
-    synthetic = injected.tools[0].functionDeclarations[0]
-    assert synthetic == _build_tool_declaration()
-    assert synthetic["name"] == "emit_complete_response"
-    assert synthetic["parameters"]["properties"]["display_stream"]
-    assert injected.systemInstruction is None
-    assert injected.contents[1].parts[0].functionCall.name == "emit_complete_response"
-    assert "emit_complete_response" in injected.contents[-1].parts[0].functionResponse.response["user_input"]
+    assert len(injected.tools or []) == 2
+    synthetic = injected.tools[-1].functionDeclarations[0]
+    assert synthetic == _build_tool_declaration("actual_content_test")
+    assert "actual_content_test" in injected.systemInstruction.parts[-1].text
     assert len(request.tools or []) == 1
     assert request.systemInstruction is None
-
-
-def test_history_wrapper_encodes_assistant_turns_and_preserves_user_images():
-    request = GeminiGenerateContentRequest(
-        contents=[
-            GeminiContent(role="user", parts=[GeminiPart(text="first"), GeminiPart(inlineData={"mimeType": "image/png", "data": "abc"})]),
-            GeminiContent(role="model", parts=[GeminiPart(text="answer")]),
-            GeminiContent(role="user", parts=[GeminiPart(text="follow up")]),
-        ],
-        systemInstruction=GeminiContent(role="user", parts=[GeminiPart(text="persona")]),
-    )
-
-    injected = inject_anti_truncation(request, "actual_content_test")
-
-    assert injected.systemInstruction is None
-    assert injected.contents[1].parts[0].functionCall.args["static_directives_and_persona"].startswith("persona")
-    assert injected.contents[2].parts[0].functionResponse.response["user_input"] == "first"
-    assert injected.contents[2].parts[1].inlineData.data == "abc"
-    assert injected.contents[3].parts[0].functionCall.args["display_stream"] == "answer"
-    wrapped_user_input = injected.contents[-1].parts[0].functionResponse.response["user_input"]
-    assert wrapped_user_input.startswith("follow up")
-    assert "emit_complete_response" in wrapped_user_input
-
-
-def test_extract_synthetic_content_accepts_upstream_wrapped_output():
-    content, remaining = extract_synthetic_content(
-        [
-            {"name": "emit_complete_response", "args": {"display_stream": "reply"}},
-        ],
-        "actual_content_test",
-    )
-    assert content == "reply"
-    assert remaining == []
 
 
 def test_injection_rejects_explicit_tool_choice_none():

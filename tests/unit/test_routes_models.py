@@ -42,18 +42,6 @@ async def test_get_single_model_returns_model_object(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_anti_truncation_metadata_uses_canonical_name_for_both_prefixes(monkeypatch):
-    monkeypatch.setattr(settings, "api_keys", frozenset())
-    async with _build_client() as client:
-        for prefix in ("抗截断-", "防外审截断-"):
-            response = await client.get(f"/v1beta/models/{prefix}gemini-3.7-flash")
-            assert response.status_code == 200
-            data = response.json()
-            assert data["name"] == f"models/抗截断-gemini-3.7-flash"
-            assert data["displayName"].startswith("抗截断-")
-
-
-@pytest.mark.asyncio
 async def test_v1_models_endpoint_is_removed(monkeypatch):
     monkeypatch.setattr(settings, "api_keys", frozenset())
     async with _build_client() as client:

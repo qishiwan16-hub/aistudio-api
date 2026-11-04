@@ -17,7 +17,7 @@ router = APIRouter()
 
 # 特殊功能变体前缀
 _FAKE_STREAM_PREFIX = "假流式-"
-_ANTI_TRUNCATION_PREFIXES = ("抗截断-", "防外审截断-")
+_ANTI_TRUNCATION_PREFIX = "抗截断-"
 
 
 def _parse_model_variant(model_path: str) -> tuple[str, str | None]:
@@ -43,10 +43,9 @@ def _parse_model_variant(model_path: str) -> tuple[str, str | None]:
     if name.startswith(_FAKE_STREAM_PREFIX):
         real_name = name[len(_FAKE_STREAM_PREFIX):]
         return prefix + real_name, "fake_stream"
-    for anti_prefix in _ANTI_TRUNCATION_PREFIXES:
-        if name.startswith(anti_prefix):
-            real_name = name[len(anti_prefix):]
-            return prefix + real_name, "anti_truncation"
+    if name.startswith(_ANTI_TRUNCATION_PREFIX):
+        real_name = name[len(_ANTI_TRUNCATION_PREFIX):]
+        return prefix + real_name, "anti_truncation"
 
     return model_path, None
 
