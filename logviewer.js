@@ -53,7 +53,7 @@ function parseRequests() {
   const infoRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:Gemini 流式请求|Gemini 生成请求|流式请求|假流式请求|抗截断请求|请求).*model=([^,]+)(?:.*对话轮数=(\d+))?(?:.*(?:尝试第\s*(\d+)\s*次|尝试=(\d+)\/\d+))?/;
   const postRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP POST.*models\/([^:/ ]+):.*->\s*(\d+)\s*\(([\d.]+)ms\)/;
   const hookRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:Hook 拦截成功|捕获请求模板成功).*model=([^,]+)(?:.*(?:snapshot|快照长度)=(\d+))?(?:.*(?:body|请求体长度)=(\d+))?/;
-  const doneRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:假流式生成完成|Gemini 流式完成|Gemini 生成完成|抗截断生成完成|流式完成|流式请求完成|非流式请求完成).*model=([^,]+)(?:.*耗时=([\d.]+)ms)?(?:.*输入[Tt]okens=(\d+))?(?:.*输出[Tt]okens=(\d+))?(?:.*总内容=(\d+))?/;
+  const doneRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:假流式生成完成|Gemini 流式完成|Gemini 生成完成|抗截断生成完成|防外审生成完成|流式完成|流式请求完成|非流式请求完成).*model=([^,]+)(?:.*耗时=([\d.]+)ms)?(?:.*输入[Tt]okens=(\d+))?(?:.*输出[Tt]okens=(\d+))?(?:.*(?:总内容|输出字符)=(\d+))?/;
   const geminiErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*\[aistudio\.api\.gemini\].*(?:未知严重异常|严重错误|Gemini错误|流式错误|请求处理发生未捕获异常|响应解析异常)[：:]\s*(.+)/;
   const httpErrRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*HTTP (?:GET|POST)\s+(\S+)\s*->\s*(\d+)\s*\(([\d.]+)ms(?:,\s*(.+))?\)/;
   const errRe = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*(?:ERROR|error|SAFETY|BLOCKED|HARM|RECITATION|RESOURCE_EXHAUSTED|finish_reason.*(?:SAFETY|RECITATION|OTHER))(.+)/i;
@@ -125,6 +125,7 @@ function parseRequests() {
       if (m[3]) r.turns = m[3];
       if (m[4] || m[5]) r.retry = '第' + (m[4] || m[5]) + '次';
       if (L.includes('假流式')) r.mode = '假流式';
+      else if (L.includes('防外审')) r.mode = '防外审截断';
       else if (L.includes('抗截断')) r.mode = '抗截断';
       else if (L.includes('Gemini 流式')) r.mode = '流式';
       else if (L.includes('Gemini 生成') || L.includes('非流式')) r.mode = '非流式';
