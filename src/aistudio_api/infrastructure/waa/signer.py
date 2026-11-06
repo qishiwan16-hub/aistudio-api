@@ -109,6 +109,7 @@ class RemoteProofSigner:
         model: str = "models/gemini-3.7-flash",
         prompt: str = "",
         wire_contents: list[Any] | None = None,
+        force_refresh: bool = False,
     ) -> str:
         """Request proof from remote proof server with automatic retry on transient failure."""
         min_cookies = filter_minimal_cookies(cookies)
@@ -128,6 +129,9 @@ class RemoteProofSigner:
         }
         if wire_contents is not None:
             payload["wireContents"] = wire_contents
+
+        if force_refresh:
+            payload["forceRefresh"] = True
 
         max_attempts = 2
         last_error: Exception | None = None
@@ -235,6 +239,8 @@ class WaaSigner:
         auth_user: str = "0",
         tier: str = "Free",
         model: str = "models/gemini-3.7-flash",
+        *,
+        force_refresh: bool = False,
     ) -> str:
         """Compute content hash and generate fresh WAA proof token."""
         prompt, content_hash = extract_content_digest(contents)
@@ -253,4 +259,5 @@ class WaaSigner:
             model=model,
             prompt=prompt,
             wire_contents=wire_contents,
+            force_refresh=force_refresh,
         )

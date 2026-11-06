@@ -250,6 +250,12 @@ class Settings:
     proof_server_url: str = os.getenv(
         "AISTUDIO_PROOF_SERVER_URL", "https://waa.spinsnow.fun"
     )
+    browserless_cookie_maintenance: bool = _load_bool_env(
+        "AISTUDIO_BROWSERLESS_COOKIE_MAINTENANCE", default=True
+    )
+    cookie_rotation_interval: int = max(
+        60, _load_int_env("AISTUDIO_COOKIE_ROTATION_INTERVAL", default=420)
+    )
     auth_file: str | None = discover_auth_file()
     tmp_dir: str = os.getenv("AISTUDIO_TMP_DIR", tempfile.gettempdir())
     proxy_url: str | None = discover_proxy_url()

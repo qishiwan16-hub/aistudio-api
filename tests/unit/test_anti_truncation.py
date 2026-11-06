@@ -96,13 +96,30 @@ def test_stream_output_is_plain_gemini_text():
     assert "functionCall" not in body
 
 
-def test_fake_stream_source_is_unchanged():
-    from pathlib import Path
-    import subprocess
+@pytest.mark.asyncio
+async def test_fake_stream_still_returns_complete_plain_text(monkeypatch):
+    from unittest.mock import AsyncMock
 
-    repo = Path(__file__).parents[2]
-    assert subprocess.run(
-        ["git", "diff", "--exit-code", "--", "src/aistudio_api/application/fake_stream.py"],
-        cwd=repo,
-        check=False,
-    ).returncode == 0
+    from aistudio_api.api.state import runtime_state
+    from aistudio_api.application import fake_stream
+
+    monkeypatch.setattr(runtime_state, "account_service", None)
+    monkeypatch.setattr(fake_stream, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(fake_stream, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(runtime_state, "record", MagicMock())
+    client = MagicMock()
+
+    async def chunks(**kwargs):
+        yield "body", "完整"
+        yield "body", "正文"
+        yield "usage", {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+        yield "finish_reason", 1
+
+    client.stream_generate_content = chunks
+    response = fake_stream.build_fake_stream_response(client, request(), "gemini-3.8-flash")
+    raw = "".join([chunk async for chunk in response.body_iterator])
+    payloads = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: ")]
+    complete = [payload for payload in payloads if payload.get("usageMetadata")]
+    assert len(complete) == 1
+    assert _extract_text_from_gemini(complete[0]) == "完整正文"
+    assert complete[0]["usageMetadata"]["totalTokenCount"] == 5

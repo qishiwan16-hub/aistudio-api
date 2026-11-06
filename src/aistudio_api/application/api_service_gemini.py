@@ -19,7 +19,7 @@ from aistudio_api.api.responses import to_gemini_parts, to_gemini_usage_metadata
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_orchestrator import (
-    MAX_RETRIES,
+    RequestRetryState,
     ensure_active_account,
     record_rotator_event,
     try_switch_account,
@@ -159,6 +159,7 @@ async def handle_attempt_exception(
     model_path: str,
     normalized_model: str | None,
     client: AIStudioClient,
+    retry_state: RequestRetryState,
     has_yielded_data: bool = False,
 ) -> bool:
     """Handle per-attempt error classification and account switching.
@@ -168,7 +169,8 @@ async def handle_attempt_exception(
     target_model = normalized_model or model_path
     account_svc = runtime_state.account_service
     active_acc = account_svc.get_active_account() if account_svc else None
-    failed_id = active_acc.id if active_acc else None
+    failed_id = retry_state.account_id or (active_acc.id if active_acc else None)
+    can_retry = not has_yielded_data and attempt + 1 < retry_state.max_attempts
 
     if isinstance(exc, ValueError):
         raise HTTPException(
@@ -178,13 +180,16 @@ async def handle_attempt_exception(
     if isinstance(exc, SessionExpiredError):
         logger.warning("账号登录已失效，被重定向到登录页: %s", exc)
         client.clear_templates()
-        if not has_yielded_data and await try_switch_account(
+        if not can_retry and failed_id and runtime_state.rotator is not None:
+            runtime_state.rotator.record_session_expired(failed_id, model=target_model)
+        if can_retry and await try_switch_account(
             model=target_model,
             failed_account_id=failed_id,
             is_session_expired=True,
+            excluded_account_ids=retry_state.exhausted_accounts,
         ):
             logger.info(
-                "已切换账号重试: 尝试=%d/%d", attempt + 1, MAX_RETRIES
+                "已切换账号重试: 尝试=%d/%d", attempt + 1, retry_state.max_attempts
             )
             return True
         raise HTTPException(
@@ -196,45 +201,42 @@ async def handle_attempt_exception(
         ) from exc
 
     if isinstance(exc, AuthError):
-        logger.warning("账号权限被拒绝 (HTTP 403): %s", exc)
+        if "region not supported" in str(exc).lower():
+            raise HTTPException(403, detail={"message": str(exc), "type": "region_error"}) from exc
+        logger.warning("账号鉴权失败: account=%s, error=%s", failed_id, exc)
         client.clear_templates()
-        record_rotator_event("auth_error", model=target_model)
+        record_rotator_event("auth_error", model=target_model, account_id=failed_id)
+        key = failed_id or "default"
+        if can_retry and key not in retry_state.auth_retried:
+            retry_state.auth_retried.add(key)
+            from aistudio_api.infrastructure.gateway.browserless import BrowserlessSession
 
-        # 1. 首次 403: 不刷新网页，直接重新走一遍签名与请求流程
-        if attempt == 0 and not has_yielded_data:
-            logger.warning(
-                "账号 403: 当前账号重新走签名流程重试 (尝试=%d/%d)",
-                attempt + 1,
-                MAX_RETRIES,
-            )
+            if isinstance(client.session, BrowserlessSession):
+                client.session.request_proof_refresh()
+            logger.info("当前账号强制重新签名后重试: account=%s", failed_id)
             return True
-
-        # 2. 当前账号重试依然 403: 尝试切换至备用账号重试一次
-        if attempt == 1 and not has_yielded_data and await try_switch_account(
-            model=target_model, failed_account_id=failed_id
-        ):
-            logger.warning(
-                "当前账号 403 重新签名仍未通过，已切换至备用账号重试 (尝试=%d/%d)",
-                attempt + 1,
-                MAX_RETRIES,
-            )
-            return True
-
-        # 3. 严格遵守重试次数限制，不再盲目重试，直接抛给下游
-        raise HTTPException(
-            403, detail={"message": str(exc), "type": "auth_error"}
-        ) from exc
+        if can_retry:
+            if failed_id:
+                retry_state.exhausted_accounts.add(failed_id)
+            if await try_switch_account(
+                model=target_model,
+                failed_account_id=failed_id,
+                excluded_account_ids=retry_state.exhausted_accounts,
+            ):
+                return True
+        raise HTTPException(403, detail={"message": str(exc), "type": "auth_error"}) from exc
 
     if isinstance(exc, UsageLimitExceeded):
         runtime_state.record(target_model, "rate_limited")
-        record_rotator_event("rate_limited", model=target_model)
-        if not has_yielded_data and await try_switch_account(
-            model=target_model, failed_account_id=failed_id
+        record_rotator_event("rate_limited", model=target_model, account_id=failed_id)
+        if can_retry and await try_switch_account(
+            model=target_model, failed_account_id=failed_id,
+            excluded_account_ids=retry_state.exhausted_accounts,
         ):
             logger.warning(
                 "触发 429 配额限制，切换账号重试: 尝试=%d/%d, model=%s",
                 attempt + 1,
-                MAX_RETRIES,
+                retry_state.max_attempts,
                 target_model,
             )
             return True
@@ -251,7 +253,7 @@ async def handle_attempt_exception(
         isinstance(exc, RequestError)
         and exc.status == 204
         and attempt == 0
-        and not has_yielded_data
+        and can_retry
     ):
         logger.warning("收到上游 204 空响应，清理模板后重试")
         client.clear_templates()
@@ -261,13 +263,12 @@ async def handle_attempt_exception(
     # 此报错为上游端点偶发抖动，在未产生输出时当场立即重试（严禁切号以防浪费配额，其他 404 严格按原样报错抛出）
     if (
         is_transient_rpc_error(exc)
-        and not has_yielded_data
-        and attempt < MAX_RETRIES - 1
+        and can_retry
     ):
         logger.warning(
             "上游偶发 404 方法未找到，立即重试: 尝试=%d/%d, 错误=%s",
             attempt + 1,
-            MAX_RETRIES,
+            retry_state.max_attempts,
             clean_upstream_error_message(str(exc)),
         )
         client.clear_templates()
@@ -276,20 +277,20 @@ async def handle_attempt_exception(
         logger.warning(
             "模板或 BotGuard 捕获超时 (%d/%d): %s，先尝试原地恢复",
             attempt + 1,
-            MAX_RETRIES,
+            retry_state.max_attempts,
             exc,
         )
         client.clear_templates()
 
         # ── 优先原地恢复：刷新页面+重新握手，避免浪费切号 ──
-        if not has_yielded_data and client._session is not None:
+        if can_retry and client._session is not None:
             try:
                 recovered = await client._session.try_recover_page()
                 if recovered:
                     logger.info(
                         "页面原地恢复成功，原账号重试 (%d/%d)",
                         attempt + 1,
-                        MAX_RETRIES,
+                        retry_state.max_attempts,
                     )
                     return True
             except Exception as recover_err:
@@ -297,14 +298,15 @@ async def handle_attempt_exception(
 
         # ── 恢复失败，降级到切号 ──
         logger.warning("原地恢复失败，降级到切换账号重试")
-        if not has_yielded_data and await try_switch_account(
-            model=target_model, failed_account_id=failed_id
+        if can_retry and await try_switch_account(
+            model=target_model, failed_account_id=failed_id,
+            excluded_account_ids=retry_state.exhausted_accounts,
         ):
-            logger.info("已切换账号重试: 尝试=%d/%d", attempt + 1, MAX_RETRIES)
+            logger.info("已切换账号重试: 尝试=%d/%d", attempt + 1, retry_state.max_attempts)
             return True
         if (
             attempt < 2
-            and not has_yielded_data
+            and can_retry
             and client._session is not None
             and client._session._in_flight <= 1
         ):
@@ -312,7 +314,7 @@ async def handle_attempt_exception(
             return True
         if isinstance(exc, BrowserTransportError):
             runtime_state.record(target_model, "errors")
-            record_rotator_event("error", model=target_model)
+            record_rotator_event("error", model=target_model, account_id=failed_id)
             logger.warning("浏览器传输中断 (502): %s", exc)
             raise HTTPException(
                 502, detail={"message": str(exc), "type": "upstream_error"}
@@ -334,7 +336,7 @@ async def handle_attempt_exception(
 
     if isinstance(exc, AistudioError):
         runtime_state.record(target_model, "errors")
-        record_rotator_event("error", model=target_model)
+        record_rotator_event("error", model=target_model, account_id=failed_id)
         logger.warning("服务端处理异常: %s", exc)
         raise HTTPException(
             500, detail={"message": str(exc), "type": "server_error"}
@@ -363,7 +365,7 @@ async def handle_attempt_exception(
             f"位置：{tb_text.splitlines()[-2].strip() if len(tb_text.splitlines()) >= 2 else 'unknown'}"
         )
         runtime_state.record(target_model, "errors")
-        record_rotator_event("error", model=target_model)
+        record_rotator_event("error", model=target_model, account_id=failed_id)
         logger.error("响应解析异常: %s", detail_msg, exc_info=True)
         client.clear_templates()
         raise HTTPException(
@@ -371,7 +373,7 @@ async def handle_attempt_exception(
         ) from exc
 
     runtime_state.record(target_model, "errors")
-    record_rotator_event("error", model=target_model)
+    record_rotator_event("error", model=target_model, account_id=failed_id)
     logger.error("请求处理发生未捕获异常: %s", exc)
     logger.debug("异常堆栈详情:", exc_info=True)
     raise HTTPException(
@@ -392,8 +394,10 @@ async def handle_gemini_generate_content(
         )
 
     last_error: Exception | None = None
-    for attempt in range(MAX_RETRIES):
+    retry_state = RequestRetryState.for_model(model_path)
+    for attempt in range(retry_state.max_attempts):
         await ensure_active_account(attempt, model=model_path)
+        retry_state.begin_attempt()
         normalized = None
         try:
             normalized = normalize_gemini_request(req, model_path)
@@ -402,7 +406,7 @@ async def handle_gemini_generate_content(
                 normalized.model,
                 len(req.contents),
                 attempt + 1,
-                MAX_RETRIES,
+                retry_state.max_attempts,
             )
             output = await client.generate_content(
                 model=normalized.model,
@@ -473,6 +477,7 @@ async def handle_gemini_generate_content(
                 model_path=model_path,
                 normalized_model=normalized.model if normalized else None,
                 client=client,
+                retry_state=retry_state,
             ):
                 continue
             raise
@@ -620,7 +625,8 @@ def _build_gemini_streaming_response(
             prefill_deduper = None  # 预填充流式去重器
             stream_completed = False
             last_stream_error: Exception | None = None
-            for stream_attempt in range(MAX_RETRIES):
+            retry_state = RequestRetryState.for_model(model_path)
+            for stream_attempt in range(retry_state.max_attempts):
                 has_yielded_data = False
                 last_stream_error = None
                 final_usage = None
@@ -628,6 +634,7 @@ def _build_gemini_streaming_response(
                 latest_response_id = None
                 buffered_thought_sig = None
                 await ensure_active_account(stream_attempt, model=model_path)
+                retry_state.begin_attempt()
                 normalized = normalize_gemini_request(req, model_path)
                 try:
                     async for event_type, text in client.stream_generate_content(
@@ -719,6 +726,7 @@ def _build_gemini_streaming_response(
                         model_path=model_path,
                         normalized_model=normalized.model if normalized else None,
                         client=client,
+                        retry_state=retry_state,
                         has_yielded_data=has_yielded_data,
                     ):
                         continue

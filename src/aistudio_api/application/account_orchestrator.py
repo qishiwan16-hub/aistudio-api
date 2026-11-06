@@ -4,12 +4,45 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass, field
 
 from aistudio_api.api.state import runtime_state
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("orchestrator")
 MAX_RETRIES = 5
+
+
+@dataclass
+class RequestRetryState:
+    """Request-local budgets; each eligible account gets one auth recovery."""
+
+    max_attempts: int = MAX_RETRIES
+    account_id: str | None = None
+    auth_retried: set[str] = field(default_factory=set)
+    exhausted_accounts: set[str] = field(default_factory=set)
+
+    @classmethod
+    def for_model(cls, model: str) -> RequestRetryState:
+        service = runtime_state.account_service
+        rotator = runtime_state.rotator
+        count = 0
+        if service is not None and rotator is not None:
+            from aistudio_api.infrastructure.gateway.model_discovery import model_discovery
+
+            count = sum(
+                1 for account in service.list_accounts()
+                if account.enabled
+                and rotator.is_account_available(account.id, model=model)
+                and model_discovery.is_model_allowed_for_tier(model, account.tier)
+            )
+        return cls(max_attempts=max(MAX_RETRIES, 2 * count))
+
+    def begin_attempt(self) -> None:
+        service = runtime_state.account_service
+        account = service.get_active_account() if service is not None else None
+        self.account_id = account.id if account is not None else None
+
 
 _switch_lock: asyncio.Lock | None = None
 _switch_lock_loop: asyncio.AbstractEventLoop | None = None
@@ -34,10 +67,12 @@ async def try_switch_account(
     required_tiers: tuple[str, ...] | list[str] | None = None,
     *,
     is_session_expired: bool = False,
+    excluded_account_ids: set[str] | None = None,
 ) -> bool:
     """尝试切换到下一个对目标 model 可用的账号。防止并发级联切号。"""
     global _last_switch_time
     entry_time = time.time()
+    excluded = excluded_account_ids or set()
 
     if model and not required_tiers:
         from aistudio_api.infrastructure.gateway.model_discovery import model_discovery
@@ -54,6 +89,7 @@ async def try_switch_account(
             cur_active = account_service.get_active_account()
             if (
                 cur_active
+                and cur_active.id not in excluded
                 and (
                     cur_active.id != failed_account_id
                     or _last_switch_time >= entry_time
@@ -83,6 +119,7 @@ async def try_switch_account(
         if (
             _last_switch_time >= entry_time
             and current_id
+            and current_id not in excluded
             and (not is_session_expired or current_id != failed_account_id)
             and (
                 not required_tiers
@@ -106,6 +143,7 @@ async def try_switch_account(
             failed_account_id
             and current_id
             and current_id != failed_account_id
+            and current_id not in excluded
             and (
                 not required_tiers
                 or (current_active and current_active.tier in required_tiers)
@@ -125,6 +163,7 @@ async def try_switch_account(
             failed_account_id=failed_account_id,
             required_tiers=required_tiers,
             is_session_expired=is_session_expired,
+            excluded_account_ids=excluded,
         )
         if next_account is None:
             if is_session_expired:
@@ -255,25 +294,29 @@ def record_rotator_event(
     event: str,
     model: str | None = None,
     usage: dict[str, object] | None = None,
+    *,
+    account_id: str | None = None,
 ) -> None:
     """记录调度器事件（成功、限流、错误、鉴权异常）。"""
     rotator = runtime_state.rotator
     account_service = runtime_state.account_service
     account = account_service.get_active_account() if account_service else None
-    if not rotator or account is None:
+    target_id = account_id or (account.id if account is not None else None)
+    if not rotator or target_id is None:
         return
     if event == "success":
-        rotator.record_success(account.id, model=model, usage=usage)
+        rotator.record_success(target_id, model=model, usage=usage)
     elif event == "rate_limited":
-        rotator.record_rate_limited(account.id, model=model)
+        rotator.record_rate_limited(target_id, model=model)
     elif event == "auth_error":
-        rotator.record_auth_error(account.id, model=model)
+        rotator.record_auth_error(target_id, model=model)
     elif event == "error":
-        rotator.record_error(account.id, model=model)
+        rotator.record_error(target_id, model=model)
 
 
 __all__ = [
     "MAX_RETRIES",
+    "RequestRetryState",
     "ensure_active_account",
     "record_rotator_event",
     "try_switch_account",

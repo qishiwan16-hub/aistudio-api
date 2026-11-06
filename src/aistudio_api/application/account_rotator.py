@@ -764,6 +764,7 @@ class AccountRotator:
         active_groups: tuple[str, ...] | list[str] | None = None,
         *,
         is_session_expired: bool = False,
+        excluded_account_ids: set[str] | None = None,
     ) -> AccountMeta | None:
         """通过硬性过滤与软配额打分挑选最佳就绪账号。"""
         async with self._lock:
@@ -780,6 +781,11 @@ class AccountRotator:
                     active_groups=active_groups,
                     ignore_auth_cooldown=True,
                 )
+                if not candidates:
+                    return None
+
+            if excluded_account_ids:
+                candidates = [(a, s) for a, s in candidates if a.id not in excluded_account_ids]
                 if not candidates:
                     return None
 

@@ -26,7 +26,7 @@ from aistudio_api.api.responses import to_gemini_parts, to_gemini_usage_metadata
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_orchestrator import (
-    MAX_RETRIES,
+    RequestRetryState,
     ensure_active_account,
     record_rotator_event,
 )
@@ -69,8 +69,10 @@ def build_fake_stream_response(
             try:
                 last_error: Exception | None = None
 
-                for attempt in range(MAX_RETRIES):
+                retry_state = RequestRetryState.for_model(model_path)
+                for attempt in range(retry_state.max_attempts):
                     await ensure_active_account(attempt, model=model_path)
+                    retry_state.begin_attempt()
                     normalized = None
                     try:
                         normalized = normalize_gemini_request(req, model_path)
@@ -189,6 +191,7 @@ def build_fake_stream_response(
                             model_path=model_path,
                             normalized_model=normalized.model if normalized else None,
                             client=client,
+                            retry_state=retry_state,
                         ):
                             continue
                         raise

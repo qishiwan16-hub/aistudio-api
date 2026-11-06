@@ -16,17 +16,24 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
+from contextvars import ContextVar
 from pathlib import Path
 
 import httpx
 
 from aistudio_api.config import settings
-from aistudio_api.domain.errors import BrowserTransportError
+from aistudio_api.domain.errors import BrowserTransportError, SessionExpiredError
 from aistudio_api.infrastructure.account.cookie_parser import (
     calculate_sapisid_hash,
     filter_minimal_cookies,
     get_tier_header_value,
     normalize_benefit_tier,
+)
+from aistudio_api.infrastructure.account.session_cookies import (
+    apply_set_cookies,
+    load_cookies_from_auth_file,
+    probe_session,
+    session_anchor,
 )
 from aistudio_api.infrastructure.gateway.model_defaults import get_active_waa_server
 from aistudio_api.infrastructure.gateway.session_state import (
@@ -91,78 +98,6 @@ def get_auth_user_from_meta(auth_file: str | None) -> str:
 
 def get_tier_from_meta(auth_file: str | None) -> str:
     return normalize_benefit_tier(str(_read_meta(auth_file).get("tier") or "Free"))
-
-
-def load_cookies_from_auth_file(auth_file: str | None) -> dict[str, str]:
-    if not auth_file or not Path(auth_file).is_file():
-        return {}
-    try:
-        data = json.loads(Path(auth_file).read_text(encoding="utf-8"))
-        cookies = data.get("cookies") or []
-        if isinstance(cookies, list):
-            return {
-                str(c.get("name") or ""): str(c.get("value") or "")
-                for c in cookies
-                if isinstance(c, dict) and c.get("name")
-            }
-        if isinstance(cookies, dict):
-            return {str(k): str(v) for k, v in cookies.items() if k}
-    except Exception as e:
-        log.warning("读取 Cookie 文件失败: %s, 错误=%s", auth_file, e)
-    return {}
-
-
-def _apply_set_cookies(auth_file: str | None, set_cookies: list[str]) -> list[str]:
-    """把 Google 响应里的 Set-Cookie 写回 auth.json（两种模式共用的文件）。"""
-    if not auth_file or not set_cookies or not Path(auth_file).is_file():
-        return []
-    updates: dict[str, str] = {}
-    for raw in set_cookies:
-        nv = raw.split(";", 1)[0].strip()
-        name, sep, value = nv.partition("=")
-        name, value = name.strip(), value.strip()
-        if not sep or not name or not value or value == "deleted":
-            continue
-        low = raw.lower()
-        if "gstatic.com" in low or "expires=thu, 01 jan 1970" in low:
-            continue
-        updates[name] = value
-    if not updates:
-        return []
-    try:
-        path = Path(auth_file)
-        data = json.loads(path.read_text(encoding="utf-8"))
-        cookies = data.get("cookies") or []
-        if not isinstance(cookies, list):
-            return []
-        changed: list[str] = []
-        for c in cookies:
-            if isinstance(c, dict) and c.get("name") in updates:
-                new_val = updates.pop(str(c["name"]))
-                if c.get("value") != new_val:
-                    c["value"] = new_val
-                    changed.append(str(c["name"]))
-        for name, value in updates.items():
-            cookies.append(
-                {
-                    "name": name,
-                    "value": value,
-                    "domain": ".google.com",
-                    "path": "/",
-                    "expires": int(time.time()) + 86400 * 180,
-                    "httpOnly": True,
-                    "secure": True,
-                    "sameSite": "None",
-                }
-            )
-            changed.append(name)
-        if changed:
-            data["cookies"] = cookies
-            atomic_write_json(path, data)
-        return changed
-    except Exception as e:
-        log.warning("回写 Set-Cookie 失败: %s, 错误=%s", auth_file, e)
-        return []
 
 
 # ── 传输层 ────────────────────────────────────────────────────────────
@@ -242,6 +177,7 @@ class HTTPStreamTransport:
         tier: str | None = None,
         auth_file: str | None = None,
     ) -> tuple[int, bytes]:
+        expected_cookies = load_cookies_from_auth_file(auth_file)
         hdrs = _build_request_headers(
             headers, auth_user=auth_user, tier=tier, auth_file=auth_file
         )
@@ -260,7 +196,11 @@ class HTTPStreamTransport:
             elapsed,
             len(resp.content),
         )
-        self._sync_cookies(resp, auth_file)
+        self._sync_cookies(resp, auth_file, expected_cookies)
+        if resp.status_code == 401 and load_cookies_from_auth_file(auth_file) == expected_cookies:
+            cookies = load_cookies_from_auth_file(auth_file)
+            if await probe_session(client, cookies, BROWSERLESS_USER_AGENT) is False:
+                raise SessionExpiredError("AI Studio session has expired; import fresh cookies")
         return resp.status_code, resp.content
 
     async def send_streaming_request(
@@ -273,6 +213,7 @@ class HTTPStreamTransport:
         tier: str | None = None,
         auth_file: str | None = None,
     ) -> AsyncGenerator[tuple[str, object], None]:
+        expected_cookies = load_cookies_from_auth_file(auth_file)
         hdrs = _build_request_headers(
             headers, auth_user=auth_user, tier=tier, auth_file=auth_file
         )
@@ -300,7 +241,11 @@ class HTTPStreamTransport:
                     status,
                     (time.perf_counter() - t0) * 1000,
                 )
-                self._sync_cookies(resp, auth_file)
+                self._sync_cookies(resp, auth_file, expected_cookies)
+                if status == 401 and load_cookies_from_auth_file(auth_file) == expected_cookies:
+                    cookies = load_cookies_from_auth_file(auth_file)
+                    if await probe_session(client, cookies, BROWSERLESS_USER_AGENT) is False:
+                        raise SessionExpiredError("AI Studio session has expired; import fresh cookies")
                 yield ("status", status)
                 if status != 200:
                     err_body = await resp.aread()
@@ -330,11 +275,15 @@ class HTTPStreamTransport:
             )
 
     @staticmethod
-    def _sync_cookies(resp: httpx.Response, auth_file: str | None) -> None:
+    def _sync_cookies(resp: httpx.Response, auth_file: str | None, expected_cookies: dict[str, str]) -> None:
         set_cookies = resp.headers.get_list("set-cookie")
         if not set_cookies:
             return
-        changed = _apply_set_cookies(auth_file, set_cookies)
+        changed = apply_set_cookies(
+            auth_file, set_cookies,
+            expected_anchor=session_anchor(expected_cookies),
+            expected_cookies=expected_cookies,
+        )
         if changed:
             log.info("Google 下发新 Cookie 已写回账号文件: %s", ",".join(changed))
 
@@ -361,6 +310,7 @@ class BrowserlessSession:
             ),
         )
         self._in_flight = 0
+        self._proof_refresh: ContextVar[str | None] = ContextVar("proof_refresh", default=None)
 
     # 浏览器专属属性：无浏览器模式下恒为 None，便于上层按 page 判断
     @property
@@ -519,6 +469,11 @@ class BrowserlessSession:
                 tpl["body"] = json.dumps(body, separators=(",", ":"))
         return tpl
 
+    def request_proof_refresh(self) -> None:
+        """Refresh the signer VM on this request only, never a concurrent request."""
+        active = self.active_context
+        self._proof_refresh.set((active.auth_file if active else self._auth_file) or "")
+
     async def generate_snapshot(
         self,
         contents: list[AistudioContent],
@@ -527,13 +482,17 @@ class BrowserlessSession:
     ) -> str:
         active = ctx or await self.ensure_ready()
         cookies = load_cookies_from_auth_file(active.auth_file)
-        return await self._signer.generate_snapshot(
+        refresh = self._proof_refresh.get() == (active.auth_file or "")
+        proof = await self._signer.generate_snapshot(
             contents=contents,
             cookies=cookies,
             auth_user=active.auth_user or "0",
             tier=active.tier or "Free",
             model=model,
+            force_refresh=refresh,
         )
+        self._proof_refresh.set(None)
+        return proof
 
     def _resolve(
         self, ctx: object | None, url: str | None, headers: dict[str, str] | None

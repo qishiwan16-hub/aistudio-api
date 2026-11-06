@@ -27,7 +27,7 @@ from aistudio_api.api.schemas import (
 )
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_orchestrator import (
-    MAX_RETRIES,
+    RequestRetryState,
     ensure_active_account,
     record_rotator_event,
 )
@@ -199,8 +199,10 @@ def build_anti_truncation_stream_response(
             len(req.contents),
             len(wrapped.contents),
         )
-        for attempt in range(MAX_RETRIES):
+        retry_state = RequestRetryState.for_model(model_path)
+        for attempt in range(retry_state.max_attempts):
             await ensure_active_account(attempt, model=model_path)
+            retry_state.begin_attempt()
             normalized = None
             try:
                 normalized = normalize_gemini_request(wrapped, model_path)
@@ -270,6 +272,7 @@ def build_anti_truncation_stream_response(
                 if await handle_attempt_exception(
                     exc, attempt=attempt, model_path=model_path,
                     normalized_model=normalized.model if normalized else None, client=client,
+                    retry_state=retry_state,
                 ):
                     continue
                 raise

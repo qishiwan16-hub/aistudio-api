@@ -6,7 +6,7 @@ import argparse
 import asyncio
 import secrets
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -193,8 +193,18 @@ async def lifespan(_app: FastAPI):
         )
 
     tier_task = asyncio.create_task(_auto_refresh_tiers())
+    cookie_task = None
+    if client.engine == "browserless" and _settings.browserless_cookie_maintenance:
+        from aistudio_api.application.cookie_maintenance import CookieMaintenance
+
+        maintenance = CookieMaintenance(account_store, rotator)
+        cookie_task = asyncio.create_task(maintenance.run())
 
     yield
+    if cookie_task is not None:
+        cookie_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cookie_task
     logger.info("服务正在关闭")
     if warmup_task and not warmup_task.done():
         warmup_task.cancel()

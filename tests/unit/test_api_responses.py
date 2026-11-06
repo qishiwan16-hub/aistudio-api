@@ -170,6 +170,7 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
 
     from fastapi import HTTPException
 
+    from aistudio_api.application.account_orchestrator import RequestRetryState
     from aistudio_api.application.api_service_gemini import handle_attempt_exception
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
 
@@ -188,6 +189,7 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
         normalized_model="models/gemini-3.7-flash",
         client=mock_client,
         has_yielded_data=False,
+        retry_state=RequestRetryState(),
     )
     assert should_retry is True
     mock_client.clear_templates.assert_called_once()
@@ -202,6 +204,7 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
             normalized_model="models/nonexistent",
             client=mock_client,
             has_yielded_data=False,
+            retry_state=RequestRetryState(),
         )
     assert exc_info.value.status_code == 404
 
@@ -214,6 +217,7 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
             normalized_model="models/gemini-3.7-flash",
             client=mock_client,
             has_yielded_data=True,
+            retry_state=RequestRetryState(),
         )
 
 
