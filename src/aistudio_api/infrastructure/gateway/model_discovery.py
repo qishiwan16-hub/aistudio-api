@@ -91,6 +91,21 @@ def _extract_model_aliases(raw: object) -> list[str]:
 # 本地保底默认模型列表（当网络未就绪或未配置账号时使用）
 _FALLBACK_MODELS = [
     {
+        "id": "gemini-4-carbon",
+        "displayName": "Gemini 4 Carbon",
+        "description": "Gemini 4 Carbon model",
+    },
+    {
+        "id": "gemini-4-carbon-high",
+        "displayName": "Gemini 4 Carbon (High Thinking)",
+        "description": "Gemini 4 Carbon with high thinking",
+    },
+    {
+        "id": "gemini-4-carbon-low",
+        "displayName": "Gemini 4 Carbon (Low Thinking)",
+        "description": "Gemini 4 Carbon with low thinking",
+    },
+    {
         "id": "gemini-3.8-flash",
         "displayName": "Gemini 3.8 Flash",
         "description": "Latest Gemini 3.8 Flash model",
@@ -288,6 +303,12 @@ class ModelDiscoveryService:
         """根据 model_id 或模型别名获取单个模型元数据（含保底匹配）。"""
         discovered = await self.get_models(session=session)
         clean_target = model_id.removeprefix("models/")
+        carbon_aliases = {
+            "carbon": "gemini-4-carbon",
+            "4-carbon": "gemini-4-carbon",
+            "gemini-4-carbon": "gemini-4-carbon",
+        }
+        clean_target = carbon_aliases.get(clean_target.lower(), clean_target)
         for model_info in discovered:
             model_raw_id = str(model_info.get("id") or model_info.get("name") or "")
             model_clean_id = model_raw_id.removeprefix("models/")

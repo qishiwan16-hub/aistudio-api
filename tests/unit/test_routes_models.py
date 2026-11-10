@@ -30,6 +30,30 @@ async def test_list_models_returns_gemini_format(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_carbon_fallback_models_and_short_aliases():
+    from aistudio_api.infrastructure.gateway.model_discovery import (
+        ModelDiscoveryService,
+        _FALLBACK_MODELS,
+    )
+
+    service = ModelDiscoveryService()
+    service._cached_models = [dict(model) for model in _FALLBACK_MODELS]
+    service._last_fetched_at = 9999999999.0
+
+    for model_id, expected_id in (
+        ("gemini-4-carbon", "gemini-4-carbon"),
+        ("gemini-4-carbon-high", "gemini-4-carbon-high"),
+        ("gemini-4-carbon-low", "gemini-4-carbon-low"),
+        ("carbon", "gemini-4-carbon"),
+        ("4-carbon", "gemini-4-carbon"),
+        ("models/carbon", "gemini-4-carbon"),
+    ):
+        model = await service.get_model_by_id(model_id)
+        assert model is not None
+        assert model["id"] == expected_id
+
+
+@pytest.mark.asyncio
 async def test_get_single_model_returns_model_object(monkeypatch):
     monkeypatch.setattr(settings, "api_keys", frozenset())
     async with _build_client() as client:
