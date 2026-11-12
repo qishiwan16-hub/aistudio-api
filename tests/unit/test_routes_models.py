@@ -41,6 +41,11 @@ async def test_carbon_fallback_models_and_short_aliases():
     service._last_fetched_at = 9999999999.0
 
     for model_id, expected_id in (
+        ("gemini-4-hydrogen", "gemini-4-hydrogen"),
+        ("gemini-4-hydrogen-high", "gemini-4-hydrogen-high"),
+        ("gemini-4-hydrogen-low", "gemini-4-hydrogen-low"),
+        ("hydrogen", "gemini-4-hydrogen"),
+        ("4-hydrogen", "gemini-4-hydrogen"),
         ("gemini-4-carbon", "gemini-4-carbon"),
         ("gemini-4-carbon-high", "gemini-4-carbon-high"),
         ("gemini-4-carbon-low", "gemini-4-carbon-low"),
