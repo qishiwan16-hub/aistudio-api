@@ -92,18 +92,18 @@ def _extract_model_aliases(raw: object) -> list[str]:
 _FALLBACK_MODELS = [
     {
         "id": "gemini-4-hydrogen",
-        "displayName": "Gemini 4 Hydrogen",
-        "description": "Gemini 4 Hydrogen model",
+        "displayName": "Gemini 4 hydrogen",
+        "description": "Gemini 4 hydrogen model",
     },
     {
         "id": "gemini-4-hydrogen-high",
-        "displayName": "Gemini 4 Hydrogen (High Thinking)",
-        "description": "Gemini 4 Hydrogen with high thinking",
+        "displayName": "Gemini 4 hydrogen (High Thinking)",
+        "description": "Gemini 4 hydrogen with high thinking",
     },
     {
         "id": "gemini-4-hydrogen-low",
-        "displayName": "Gemini 4 Hydrogen (Low Thinking)",
-        "description": "Gemini 4 Hydrogen with low thinking",
+        "displayName": "Gemini 4 hydrogen (Low Thinking)",
+        "description": "Gemini 4 hydrogen with low thinking",
     },
     {
         "id": "gemini-4-carbon",
